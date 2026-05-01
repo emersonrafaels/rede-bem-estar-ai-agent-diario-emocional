@@ -1,0 +1,13 @@
+categoria,emotion_type,display_name,descricao,escala_min,escala_max,emoji_1,emoji_2,emoji_3,emoji_4,emoji_5,cor_low,cor_mid,cor_high
+basic,mood,Humor,Como você está se sentindo hoje?,1,5,😢,😔,😐,😊,🤩,"hsl(0, 70%, 50%)","hsl(45, 100%, 50%)","hsl(120, 60%, 50%)"
+basic,anxiety,Ansiedade,Como está sua ansiedade?,1,5,😌,🙂,😐,😟,😰,"hsl(120, 60%, 50%)","hsl(45, 100%, 50%)","hsl(0, 70%, 50%)"
+basic,energy,Energia,Qual seu nível de energia?,1,5,😴,🥱,😐,⚡,🔥,"hsl(210, 50%, 40%)","hsl(45, 100%, 50%)","hsl(30, 100%, 50%)"
+advanced,stress,Estresse,Nível de estresse percebido,1,5,🧘,😌,😐,😥,😓,"hsl(120, 60%, 50%)","hsl(45, 100%, 50%)","hsl(0, 70%, 50%)"
+advanced,motivation,Motivação,Quão motivado você se sente?,1,5,😞,😕,😐,🙂,😊,"hsl(210, 50%, 40%)","hsl(45, 100%, 50%)","hsl(280, 70%, 50%)"
+advanced,focus,Foco,Capacidade de concentração,1,5,😶,🤔,🎯,🎯,🎯,"hsl(0, 70%, 50%)","hsl(45, 100%, 50%)","hsl(200, 70%, 50%)"
+wellbeing,gratitude,Gratidão,Sentimento de gratidão,1,5,😔,😕,😐,🙂,😊,"hsl(210, 50%, 40%)","hsl(45, 100%, 50%)","hsl(320, 70%, 60%)"
+wellbeing,confidence,Confiança,Autoconfiança,1,5,😰,😟,😕,😐,🙂,"hsl(0, 70%, 50%)","hsl(45, 100%, 50%)","hsl(280, 70%, 50%)"
+wellbeing,hope,Esperança,Nível de esperança e otimismo,1,5,😞,😕,😐,🙂,😊,"hsl(210, 50%, 40%)","hsl(45, 100%, 50%)","hsl(200, 70%, 60%)"
+professional,creativity,Criatividade,Nível de criatividade,1,5,😶,😐,🙂,😊,💡,"hsl(210, 50%, 40%)","hsl(45, 100%, 50%)","hsl(280, 70%, 50%)"
+professional,productivity,Produtividade,Quão produtivo você se sentiu?,1,5,😴,😕,😐,🙂,😊,"hsl(0, 70%, 50%)","hsl(45, 100%, 50%)","hsl(120, 60%, 50%)"
+professional,satisfaction,Satisfação,Satisfação geral com o dia,1,5,😞,😕,😐,🙂,😊,"hsl(0, 70%, 50%)","hsl(45, 100%, 50%)","hsl(120, 60%, 50%)"
