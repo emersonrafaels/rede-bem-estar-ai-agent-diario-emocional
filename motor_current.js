@@ -1,4 +1,4 @@
-
+﻿
 
 const input = $input.first().json;
 const CFG = input.cfg || {};
@@ -12,6 +12,7 @@ const INBOUND_RATE_LIMIT_MAX = Number(CFG.INBOUND_RATE_LIMIT_MAX || 12);
 const INBOUND_RATE_LIMIT_WINDOW_SECONDS = Number(CFG.INBOUND_RATE_LIMIT_WINDOW_SECONDS || 30);
 const RATE_LIMIT_COOLDOWN_BASE_SECONDS = Number(CFG.RATE_LIMIT_COOLDOWN_BASE_SECONDS || 8);
 const RATE_LIMIT_COOLDOWN_MAX_SECONDS = Number(CFG.RATE_LIMIT_COOLDOWN_MAX_SECONDS || 120);
+const SESSION_STALE_HOURS = Number(CFG.SESSION_STALE_HOURS || 4);
 
 let inboundDedupDisabled = false;
 let inboundRateLimitCooldownDisabled = false;
@@ -69,9 +70,40 @@ function extractPayload(payload) {
   };
 }
 
-function hashCode(code) {
-  const crypto = require('crypto');
-  return crypto.createHash('sha256').update(String(code || '').trim()).digest('hex');
+async function hashCode(code) {
+  const normalized = String(code || '').trim();
+
+  if (globalThis?.crypto?.subtle && typeof TextEncoder !== 'undefined') {
+    const encoded = new TextEncoder().encode(normalized);
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', encoded);
+    const bytes = Array.from(new Uint8Array(digest));
+
+    return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  return hashCodeFallback(normalized);
+}
+
+function hashCodeFallback(input) {
+  // Deterministic fallback for environments where Web Crypto is unavailable.
+  let h1 = 0xdeadbeef ^ input.length;
+  let h2 = 0x41c6ce57 ^ input.length;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+
+  const p1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const p2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  const p3 = ((h1 ^ h2) >>> 0).toString(16).padStart(8, '0');
+  const p4 = (Math.imul(h1, h2) >>> 0).toString(16).padStart(8, '0');
+
+  return `${p1}${p2}${p3}${p4}`;
 }
 
 function newOtp() {
@@ -79,15 +111,47 @@ function newOtp() {
 }
 
 function isStartCommand(t) {
-  return ['diario', 'diÃ¡rio', 'checkin', 'check-in', 'comeÃ§ar', 'comecar', 'iniciar'].includes(t);
+  return ['diario', 'diário', 'checkin', 'check-in', 'começar', 'comecar', 'iniciar'].includes(t);
 }
 
 function isCancel(t) {
   return ['cancelar', 'sair', 'parar', 'encerrar', 'reiniciar'].includes(t);
 }
 
-function isGoBack(t) {
-  return ['voltar', 'volta', 'anterior', '<', 'back', 'retornar', 'retorna'].includes(t);
+function isBack(t) {
+  return ['voltar', 'anterior', 'volta'].includes(t);
+}
+
+function isHelp(t) {
+  return ['ajuda', 'help', '?', 'comandos'].includes(t);
+}
+
+function isResumo(t) {
+  return ['resumo', 'historico', 'histórico', 'semana'].includes(t);
+}
+
+function isRegistrarHojeCommand(t) {
+  return ['registrar hoje', 'registrar diário hoje', 'registrar diario hoje'].includes(t);
+}
+
+function isAjustarHojeCommand(t) {
+  return ['ajustar hoje', 'editar hoje', 'ajustar diário hoje', 'ajustar diario hoje'].includes(t);
+}
+
+function isUltimoRegistroCommand(t) {
+  return ['último registro', 'ultimo registro', 'ver último registro', 'ver ultimo registro'].includes(t);
+}
+
+function isInsightsCommand(t) {
+  return ['insights', 'meus insights', 'ver insights'].includes(t);
+}
+
+function isReminderEnableCommand(t) {
+  return ['ativar lembretes', 'ativar aviso', 'ativar notificacao', 'lembretes', 'aviso', 'notificacao'].includes(t);
+}
+
+function isReminderDisableCommand(t) {
+  return ['desativar lembretes', 'desativar aviso', 'desativar notificacao', 'sem lembretes', 'sem aviso'].includes(t);
 }
 
 function parseScaleNumber(text, scaleMin = 1, scaleMax = 5) {
@@ -118,7 +182,7 @@ function yesterdayISO() {
 }
 
 function formatDateBR(dateValue) {
-  if (!dateValue) return 'data nÃ£o informada';
+  if (!dateValue) return 'data não informada';
 
   const [year, month, day] = String(dateValue).slice(0, 10).split('-');
 
@@ -146,11 +210,11 @@ function parseDateInput(text) {
 
   const weekdayMap = {
     'segunda': 1, 'segunda-feira': 1,
-    'terca': 2, 'terca-feira': 2, 'terÃ§a': 2, 'terÃ§a-feira': 2,
+    'terca': 2, 'terca-feira': 2, 'terça': 2, 'terça-feira': 2,
     'quarta': 3, 'quarta-feira': 3,
     'quinta': 4, 'quinta-feira': 4,
     'sexta': 5, 'sexta-feira': 5,
-    'sabado': 6, 'sÃ¡bado': 6,
+    'sabado': 6, 'sábado': 6,
     'domingo': 0
   };
 
@@ -216,10 +280,10 @@ const DEFAULT_EMOTION_CATALOG = {
   mood: {
     category: 'basic',
     display_name: 'Humor',
-    description: 'Como vocÃª estÃ¡ se sentindo hoje?',
+    description: 'Como você está se sentindo hoje?',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜¢', 'ðŸ˜”', 'ðŸ˜', 'ðŸ˜Š', 'ðŸ¤©'],
+    emoji_set: ['😢', '😓', '😐', '😊', '🤩'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -229,10 +293,10 @@ const DEFAULT_EMOTION_CATALOG = {
   anxiety: {
     category: 'basic',
     display_name: 'Ansiedade',
-    description: 'Como estÃ¡ sua ansiedade?',
+    description: 'Como está sua ansiedade?',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜Œ', 'ðŸ™‚', 'ðŸ˜', 'ðŸ˜Ÿ', 'ðŸ˜°'],
+    emoji_set: ['😌', '🙂', '😐', '😟', '😰'],
     color_scheme: {
       low: 'hsl(120, 60%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -242,10 +306,10 @@ const DEFAULT_EMOTION_CATALOG = {
   energy: {
     category: 'basic',
     display_name: 'Energia',
-    description: 'Qual seu nÃ­vel de energia?',
+    description: 'Qual seu nível de energia?',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜´', 'ðŸ¥±', 'ðŸ˜', 'âš¡', 'ðŸ”¥'],
+    emoji_set: ['😴', '🥱', '😐', '⚡', '🔥'],
     color_scheme: {
       low: 'hsl(210, 50%, 40%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -255,10 +319,10 @@ const DEFAULT_EMOTION_CATALOG = {
   stress: {
     category: 'advanced',
     display_name: 'Estresse',
-    description: 'NÃ­vel de estresse percebido',
+    description: 'Nível de estresse percebido',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ§˜', 'ðŸ˜Œ', 'ðŸ˜', 'ðŸ˜¥', 'ðŸ˜“'],
+    emoji_set: ['🧘', '😌', '😐', '😥', '😓'],
     color_scheme: {
       low: 'hsl(120, 60%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -267,11 +331,11 @@ const DEFAULT_EMOTION_CATALOG = {
   },
   motivation: {
     category: 'advanced',
-    display_name: 'MotivaÃ§Ã£o',
-    description: 'QuÃ£o motivado vocÃª se sente?',
+    display_name: 'Motivação',
+    description: 'Quão motivado você se sente?',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜ž', 'ðŸ˜•', 'ðŸ˜', 'ðŸ™‚', 'ðŸ˜Š'],
+    emoji_set: ['😞', '😕', '😐', '🙂', '😊'],
     color_scheme: {
       low: 'hsl(210, 50%, 40%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -281,10 +345,10 @@ const DEFAULT_EMOTION_CATALOG = {
   focus: {
     category: 'advanced',
     display_name: 'Foco',
-    description: 'Capacidade de concentraÃ§Ã£o',
+    description: 'Capacidade de concentração',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜¶', 'ðŸ¤”', 'ðŸŽ¯', 'ðŸŽ¯', 'ðŸŽ¯'],
+    emoji_set: ['😶', '🤔', '🎯', '🎯', '🎯'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -293,11 +357,11 @@ const DEFAULT_EMOTION_CATALOG = {
   },
   gratitude: {
     category: 'wellbeing',
-    display_name: 'GratidÃ£o',
-    description: 'Sentimento de gratidÃ£o',
+    display_name: 'Gratidão',
+    description: 'Sentimento de gratidão',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜”', 'ðŸ˜•', 'ðŸ˜', 'ðŸ™‚', 'ðŸ˜Š'],
+    emoji_set: ['😓', '😕', '😐', '🙂', '😊'],
     color_scheme: {
       low: 'hsl(210, 50%, 40%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -306,11 +370,11 @@ const DEFAULT_EMOTION_CATALOG = {
   },
   confidence: {
     category: 'wellbeing',
-    display_name: 'ConfianÃ§a',
-    description: 'AutoconfianÃ§a',
+    display_name: 'Confiança',
+    description: 'Autoconfiança',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜°', 'ðŸ˜Ÿ', 'ðŸ˜•', 'ðŸ˜', 'ðŸ™‚'],
+    emoji_set: ['😰', '😟', '😕', '😐', '🙂'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -319,11 +383,11 @@ const DEFAULT_EMOTION_CATALOG = {
   },
   hope: {
     category: 'wellbeing',
-    display_name: 'EsperanÃ§a',
-    description: 'NÃ­vel de esperanÃ§a e otimismo',
+    display_name: 'Esperança',
+    description: 'Nível de esperança e otimismo',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜ž', 'ðŸ˜•', 'ðŸ˜', 'ðŸ™‚', 'ðŸ˜Š'],
+    emoji_set: ['😞', '😕', '😐', '🙂', '😊'],
     color_scheme: {
       low: 'hsl(210, 50%, 40%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -333,10 +397,10 @@ const DEFAULT_EMOTION_CATALOG = {
   creativity: {
     category: 'professional',
     display_name: 'Criatividade',
-    description: 'NÃ­vel de criatividade',
+    description: 'Nível de criatividade',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜¶', 'ðŸ˜', 'ðŸ™‚', 'ðŸ˜Š', 'ðŸ’¡'],
+    emoji_set: ['😶', '😐', '🙂', '😊', '💡'],
     color_scheme: {
       low: 'hsl(210, 50%, 40%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -346,10 +410,10 @@ const DEFAULT_EMOTION_CATALOG = {
   productivity: {
     category: 'professional',
     display_name: 'Produtividade',
-    description: 'QuÃ£o produtivo vocÃª se sentiu?',
+    description: 'Quão produtivo você se sentiu?',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜´', 'ðŸ˜•', 'ðŸ˜', 'ðŸ™‚', 'ðŸ˜Š'],
+    emoji_set: ['😴', '😕', '😐', '🙂', '😊'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -358,11 +422,11 @@ const DEFAULT_EMOTION_CATALOG = {
   },
   satisfaction: {
     category: 'professional',
-    display_name: 'SatisfaÃ§Ã£o',
-    description: 'SatisfaÃ§Ã£o geral com o dia',
+    display_name: 'Satisfação',
+    description: 'Satisfação geral com o dia',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['ðŸ˜ž', 'ðŸ˜•', 'ðŸ˜', 'ðŸ™‚', 'ðŸ˜Š'],
+    emoji_set: ['😞', '😕', '😐', '🙂', '😊'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -434,7 +498,7 @@ function normalizeEmotionConfigurations(rows = []) {
       let emojiSet = configuredEmojiSet;
 
       if (emotionType === 'focus' && scaleMin === 1 && scaleMax === 5) {
-        emojiSet = ['ðŸ˜¶', 'ðŸ¤”', 'ðŸŽ¯', 'ðŸŽ¯', 'ðŸŽ¯'];
+        emojiSet = ['😶', '🤔', '🎯', '🎯', '🎯'];
       }
 
       if (!emojiSet.length && Array.isArray(catalog?.emoji_set)) {
@@ -467,10 +531,10 @@ function defaultEmotionConfigurations() {
     {
       emotion_type: 'mood',
       display_name: 'Humor',
-      description: 'Como vocÃª estÃ¡ se sentindo hoje?',
+      description: 'Como você está se sentindo hoje?',
       scale_min: 1,
       scale_max: 5,
-      emoji_set: ['ðŸ˜¢', 'ðŸ˜”', 'ðŸ˜', 'ðŸ˜Š', 'ðŸ¤©'],
+      emoji_set: ['😢', '😓', '😐', '😊', '🤩'],
       color_scheme: {
         low: 'hsl(0, 70%, 50%)',
         mid: 'hsl(45, 100%, 50%)',
@@ -482,10 +546,10 @@ function defaultEmotionConfigurations() {
     {
       emotion_type: 'energy',
       display_name: 'Energia',
-      description: 'Qual seu nÃ­vel de energia?',
+      description: 'Qual seu nível de energia?',
       scale_min: 1,
       scale_max: 5,
-      emoji_set: ['ðŸ˜´', 'ðŸ¥±', 'ðŸ˜', 'âš¡', 'ðŸ”¥'],
+      emoji_set: ['😴', '🥱', '😐', '⚡', '🔥'],
       color_scheme: {
         low: 'hsl(210, 50%, 40%)',
         mid: 'hsl(45, 100%, 50%)',
@@ -497,10 +561,10 @@ function defaultEmotionConfigurations() {
     {
       emotion_type: 'anxiety',
       display_name: 'Ansiedade',
-      description: 'Como estÃ¡ sua ansiedade?',
+      description: 'Como está sua ansiedade?',
       scale_min: 1,
       scale_max: 5,
-      emoji_set: ['ðŸ˜Œ', 'ðŸ™‚', 'ðŸ˜', 'ðŸ˜Ÿ', 'ðŸ˜°'],
+      emoji_set: ['😌', '🙂', '😐', '😟', '😰'],
       color_scheme: {
         low: 'hsl(120, 60%, 50%)',
         mid: 'hsl(45, 100%, 50%)',
@@ -558,14 +622,21 @@ function buildEmotionScaleLines(config) {
   return lines;
 }
 
-function emotionQuestion(config, position = 0, total = 1) {
+function buildStageHeader(stageNumber, stageTotal, title) {
+  return `Etapa ${stageNumber} de ${stageTotal} — ${title}`;
+}
+
+function emotionQuestion(config, position = 0, total = 1, options = {}) {
+  const showStageHeader = options.showStageHeader !== false;
+  const stageHeader = showStageHeader
+    ? `${buildStageHeader(1, 4, 'Como você está se sentindo')}\n\n`
+    : '';
   const description = config?.description ? `\n\n${config.description}` : '';
   const lines = buildEmotionScaleLines(config);
   const min = Number(config?.scale_min ?? 1);
   const max = Number(config?.scale_max ?? 5);
-  const backHint = position > 0 ? '\n\nEnvie *voltar* para retornar à pergunta anterior.' : '';
 
-  return `(${position + 1}/${total}) ${config?.display_name || config?.emotion_type || 'Emoção'}${description}\n\n${lines.join('\n')}\n\nResponda com um número entre ${min} e ${max}.${backHint}`;
+  return `${stageHeader}${position + 1}/${total} • ${config?.display_name || config?.emotion_type || 'Emoção'}${description}\n\n${lines.join('\n')}\n\nResponda com um número entre ${min} e ${max}.`;
 }
 
 function formatEmotionSummaryLines(payload = {}) {
@@ -576,9 +647,9 @@ function formatEmotionSummaryLines(payload = {}) {
 
   if (!emotionConfigurations.length) {
     return [
-      `ðŸ’­ Humor: ${safePayload.mood_score || 'NÃ£o informado'}/5`,
-      `âš¡ Energia: ${safePayload.energy_level || 'NÃ£o informado'}/5`,
-      `ðŸŒ§ï¸ Ansiedade: ${safePayload.anxiety_level || 'NÃ£o informado'}/5`
+      `💭 Humor: ${safePayload.mood_score || 'Não informado'}/5`,
+      `⚡ Energia: ${safePayload.energy_level || 'Não informado'}/5`,
+      `🌧️ Ansiedade: ${safePayload.anxiety_level || 'Não informado'}/5`
     ];
   }
 
@@ -586,15 +657,15 @@ function formatEmotionSummaryLines(payload = {}) {
     const score = safePayload.emotion_answers?.[config.emotion_type] ?? null;
     const label = config.display_name || config.emotion_type;
 
-    if (score == null) return `â€¢ ${label}: NÃ£o informado`;
+    if (score == null) return `• ${label}: Não informado`;
 
-    return `â€¢ ${label}: ${score}/${config.scale_max}`;
+    return `• ${label}: ${score}/${config.scale_max}`;
   });
 }
 
 function parseSleepHours(text) {
   const t = String(text || '').trim().toLowerCase();
-  if (['pular', 'skip', 'nÃ£o', 'nao', 'n', '-'].includes(t)) return { skip: true, value: null };
+  if (['pular', 'skip', 'não', 'nao', 'n', '-'].includes(t)) return { skip: true, value: null };
 
   const num = parseFloat(t.replace(',', '.'));
   if (Number.isNaN(num) || num < 0 || num > 24) return { error: true };
@@ -604,7 +675,7 @@ function parseSleepHours(text) {
 
 function parseSleepQuality(text) {
   const t = String(text || '').trim().toLowerCase();
-  if (['pular', 'skip', 'nÃ£o', 'nao', 'n', '-'].includes(t)) return { skip: true, value: null };
+  if (['pular', 'skip', 'não', 'nao', 'n', '-'].includes(t)) return { skip: true, value: null };
 
   const num = parseInt(t, 10);
   if (Number.isNaN(num) || num < 1 || num > 5) return { error: true };
@@ -613,29 +684,32 @@ function parseSleepQuality(text) {
 }
 
 function sleepHoursQuestion() {
-  return `ðŸ˜´ *Quantas horas vocÃª dormiu na Ãºltima noite?*
-
-Digite um nÃºmero (ex: 7 ou 7.5).
-Envie *pular* se nÃ£o quiser informar.`;
+  return `${buildStageHeader(2, 4, 'Sono e descanso')}\n\n😴 *Quantas horas você dormiu na última noite?*\n\nDigite um número (ex: 7 ou 7.5).\nEnvie *pular* se não quiser informar.`;
 }
 
 function sleepQualityQuestion() {
-  return `ðŸ›Œ *Como foi a qualidade do seu sono?*
-
-1ï¸âƒ£ Muito ruim
-2ï¸âƒ£ Ruim
-3ï¸âƒ£ Regular
-4ï¸âƒ£ Bom
-5ï¸âƒ£ Excelente
-
-Envie *pular* para nÃ£o informar.`;
+  return `${buildStageHeader(2, 4, 'Sono e descanso')}\n\n🛌 *Como foi a qualidade do seu sono?*\n\n1️⃣ Muito ruim\n2️⃣ Ruim\n3️⃣ Regular\n4️⃣ Bom\n5️⃣ Excelente\n\nEnvie *pular* para não informar.`;
 }
 
-function contextQuestion() {
-  return `O que mais marcou esse dia?
+function contextQuestion(payload = {}) {
+  const safePayload = applyLegacyEmotionFields(payload || {});
+  const mood = Number(safePayload.mood_score || 0);
+  const energy = Number(safePayload.energy_level || 0);
+  const anxiety = Number(safePayload.anxiety_level || 0);
 
-Pode responder com uma palavra ou frase curta.
-Exemplo: prova, trabalho, sono ruim, cansaÃ§o, apresentaÃ§Ã£o, conversa difÃ­cil, dia tranquilo.`;
+  let prompt = 'O que mais marcou esse dia?';
+
+  if (anxiety >= 4) {
+    prompt = 'Teve algo específico que aumentou sua ansiedade hoje?';
+  } else if (mood <= 2) {
+    prompt = 'Teve algum momento mais difícil que influenciou seu humor hoje?';
+  } else if (energy <= 2) {
+    prompt = 'Teve algo que drenou sua energia hoje?';
+  } else if (mood >= 4 && energy >= 4 && anxiety <= 2) {
+    prompt = 'Que momento positivo mais contribuiu para você se sentir bem hoje?';
+  }
+
+  return `${buildStageHeader(3, 4, 'Contexto do dia')}\n\n${prompt}\n\nPode responder com uma palavra ou frase curta.\nExemplo: prova, trabalho, sono ruim, cansaço, apresentação, conversa difícil, dia tranquilo.`;
 }
 
 async function httpJson(url, options = {}) {
@@ -749,7 +823,7 @@ async function registerInboundMessage(phone, messageId, rawPayload = {}) {
       body: JSON.stringify({
         message_id: normalizedMessageId,
         phone,
-        source: 'evolution_api',
+        source: 'Diario Emocional - Whatsapp',
         received_at: new Date().toISOString(),
         raw_payload: rawPayload || {}
       }),
@@ -768,7 +842,8 @@ async function registerInboundMessage(phone, messageId, rawPayload = {}) {
       return { isDuplicate: false, mode: 'missing_table' };
     }
 
-    throw error;
+    inboundDedupDisabled = true;
+    return { isDuplicate: false, mode: 'error_fallback' };
   }
 }
 
@@ -920,13 +995,15 @@ async function sendWhatsApp(phone, text) {
 }
 
 async function sendEmailOtp(to, code) {
-  const subject = 'CÃ³digo de verificaÃ§Ã£o | Rede Bem-Estar';
+  if (!CFG.RESEND_API_KEY || !CFG.FROM_EMAIL) {
+    const err = new Error('EMAIL_PROVIDER_NOT_CONFIGURED');
+    err.code = 'EMAIL_PROVIDER_NOT_CONFIGURED';
+    throw err;
+  }
 
-  const text = `Seu cÃ³digo de verificaÃ§Ã£o da Rede Bem-Estar Ã©: ${code}
+  const subject = 'Código de verificação | Rede Bem-Estar';
 
-Ele expira em 10 minutos.
-
-Se vocÃª nÃ£o solicitou esse cÃ³digo, ignore este e-mail.`;
+  const text = `Seu código de verificação da Rede Bem-Estar é: ${code}\n\nEle expira em 10 minutos.\n\nSe você não solicitou esse código, ignore este e-mail.`;
 
   return await httpJson('https://api.resend.com/emails', {
     method: 'POST',
@@ -1102,47 +1179,105 @@ async function touchLink(phone) {
   } catch (e) {}
 }
 
+function buildBuddyFallbackMessage(riskLevel) {
+  if (['attention', 'alert', 'critical'].includes(String(riskLevel || '').toLowerCase())) {
+    return 'Obrigado por compartilhar o que está sentindo. Se isso estiver pesado agora, procure alguém de confiança ou apoio profissional da sua instituição.';
+  }
+
+  return 'Obrigado por compartilhar como você está hoje. Que tal fazer uma pausa breve e gentil para respirar e se cuidar um pouco?';
+}
+
+function sanitizeBuddyMessage(buddyMessage) {
+  const text = String(buddyMessage || '').trim();
+
+  if (!text) return '';
+
+  return text
+    .replace(/^Registro salvo com carinho\s*💜\s*/i, '')
+    .replace(/^Registro salvo com carinho\s*/i, '')
+    .trim();
+}
+
+function pickMainPoint(payload = {}) {
+  const safePayload = applyLegacyEmotionFields(payload || {});
+  const context = String(safePayload.day_context || '').trim();
+
+  if (context) return context;
+
+  const candidates = [
+    { label: 'humor', value: safePayload.mood_score },
+    { label: 'energia', value: safePayload.energy_level },
+    { label: 'ansiedade', value: safePayload.anxiety_level != null ? 6 - Number(safePayload.anxiety_level) : null }
+  ].filter((item) => Number.isFinite(Number(item.value)));
+
+  if (!candidates.length) return 'rotina do dia';
+
+  candidates.sort((a, b) => Number(a.value) - Number(b.value));
+  return candidates[0].label;
+}
+
+function buildPostSaveMessage(payload, buddyMessage, streak, total) {
+  const safePayload = applyLegacyEmotionFields(payload || {});
+  const cleanBuddyMessage = sanitizeBuddyMessage(buddyMessage) || buildBuddyFallbackMessage('healthy');
+  const mainPoint = pickMainPoint(safePayload);
+  const lines = [
+    'Registro salvo com carinho 💜',
+    '',
+    'Resumo do seu registro de hoje',
+    '',
+    `📌 Ponto principal: ${mainPoint}`,
+    `😊 Humor: ${safePayload.mood_score != null ? safePayload.mood_score + '/5' : 'não informado'}`,
+    `⚡ Energia: ${safePayload.energy_level != null ? safePayload.energy_level + '/5' : 'não informado'}`,
+    `😟 Ansiedade: ${safePayload.anxiety_level != null ? safePayload.anxiety_level + '/5' : 'não informado'}`,
+    `😴 Sono: ${safePayload.sleep_hours != null ? safePayload.sleep_hours + 'h' : 'não informado'}`,
+    `🛌 Qualidade do sono: ${safePayload.sleep_quality != null ? safePayload.sleep_quality + '/5' : 'não informado'}`,
+    '',
+    'Leitura do Buddy:',
+    cleanBuddyMessage
+  ];
+
+  if (total === 1) {
+    lines.push('');
+    lines.push('🌱 Este é seu primeiro registro. Com mais alguns dias, vou conseguir te ajudar a perceber padrões com mais clareza.');
+  }
+
+  const streakMsg = formatStreakMessage(streak, total);
+  if (streakMsg) lines.push(streakMsg.trim());
+
+  return lines.join('\n');
+}
+
 async function callGpt(payload, riskLevel) {
   const safePayload = applyLegacyEmotionFields(payload || {});
   const emotionLines = formatEmotionSummaryLines(safePayload).join('\n');
 
-  const system = `VocÃª Ã© o Buddy da Rede Bem-Estar, um assistente de acolhimento emocional leve para estudantes.
-Gere uma resposta curta, humana, acolhedora e segura.
-NÃ£o faÃ§a diagnÃ³stico.
-NÃ£o substitua psicÃ³logo, mÃ©dico ou atendimento emergencial.
-NÃ£o prometa cura.
-Sugira no mÃ¡ximo uma aÃ§Ã£o simples de autocuidado.
-Se o nÃ­vel estiver como attention, alert ou critical, oriente buscar apoio humano da instituiÃ§Ã£o ou alguÃ©m de confianÃ§a, sem alarmismo.`;
+  const system = `Você é o Buddy da Rede Bem-Estar, um assistente de acolhimento emocional leve para estudantes.\nGere uma resposta curta, humana, acolhedora e segura.\nNão faça diagnóstico.\nNão substitua psicólogo, médico ou atendimento emergencial.\nNão prometa cura.\nSugira no máximo uma ação simples de autocuidado.\nSe o nível estiver como attention, alert ou critical, oriente buscar apoio humano da instituição ou alguém de confiança, sem alarmismo.`;
 
-  const user = `Registro do diÃ¡rio emocional:
-Data: ${safePayload.entry_date || todayISO()}
-EmoÃ§Ãµes:
-${emotionLines}
-Contexto: ${safePayload.day_context || ''}
-Texto livre: ${safePayload.free_text || ''}
-Risk level: ${riskLevel}
+  const user = `Registro do diário emocional:\nData: ${safePayload.entry_date || todayISO()}\nEmoções:\n${emotionLines}\nContexto: ${safePayload.day_context || ''}\nTexto livre: ${safePayload.free_text || ''}\nRisk level: ${riskLevel}\n\nGere uma mensagem final de até 500 caracteres.`;
 
-Gere uma mensagem final de atÃ© 500 caracteres.`;
+  try {
+    const data = await httpJson('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${CFG.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: CFG.OPENAI_MODEL,
+        input: [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ]
+      })
+    });
 
-  const data = await httpJson('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${CFG.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: CFG.OPENAI_MODEL,
-      input: [
-        { role: 'system', content: system },
-        { role: 'user', content: user }
-      ]
-    })
-  });
-
-  return (
-    data.output_text ||
-    data.output?.[0]?.content?.[0]?.text ||
-    'Registro salvo com carinho ðŸ’œ Obrigado por compartilhar como vocÃª estÃ¡ hoje.'
-  );
+    return (
+      data.output_text ||
+      data.output?.[0]?.content?.[0]?.text ||
+      buildBuddyFallbackMessage(riskLevel)
+    );
+  } catch (_) {
+    return buildBuddyFallbackMessage(riskLevel);
+  }
 }
 
 function classifyRiskLevel(payload) {
@@ -1217,6 +1352,58 @@ async function getUserEmotionConfigurations(userId) {
   return normalized.length ? normalized : defaultEmotionConfigurations();
 }
 
+function pickEmotionConfigurationsForSession(allConfigs = [], lastData = null, trends = {}, maxExtras = 3) {
+  const configs = Array.isArray(allConfigs) ? allConfigs : [];
+  if (!configs.length) return [];
+
+  const basics = ['mood', 'energy', 'anxiety'];
+  const selectedTypes = new Set();
+
+  for (const basic of basics) {
+    const found = configs.find((item) => item.emotion_type === basic);
+    if (found) selectedTypes.add(found.emotion_type);
+  }
+
+  const extraCandidates = configs.filter((item) => !selectedTypes.has(item.emotion_type));
+  const scoredCandidates = extraCandidates.map((item, index) => ({
+    item,
+    index,
+    score: 0
+  }));
+
+  const lastPayload = lastData?.entry
+    ? applyLegacyEmotionFields(buildPayloadFromExistingEntry(lastData.entry, lastData.analysis))
+    : null;
+
+  if (lastPayload) {
+    const prevAnswers = normalizeEmotionAnswers(lastPayload.emotion_answers || {});
+
+    for (const candidate of scoredCandidates) {
+      const emotionType = candidate.item.emotion_type;
+      const value = Number(prevAnswers[emotionType]);
+      if (!Number.isFinite(value)) continue;
+
+      if (value <= 2 || value >= 4) {
+        candidate.score += 2;
+      } else {
+        candidate.score += 1;
+      }
+
+      const trendData = trends?.custom?.[emotionType];
+      if (trendData?.variance && trendData.variance > 1) {
+        candidate.score += 1;
+      }
+    }
+  }
+
+  scoredCandidates
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, Math.max(0, maxExtras))
+    .forEach((candidate) => selectedTypes.add(candidate.item.emotion_type));
+
+  return configs.filter((item) => selectedTypes.has(item.emotion_type));
+}
+
 function parseJournalText(journalText) {
   const text = String(journalText || '');
 
@@ -1265,13 +1452,36 @@ function formatEntrySummary(entry, analysis = null) {
   const payload = applyLegacyEmotionFields(buildPayloadFromExistingEntry(entry, analysis));
   const emotionLines = formatEmotionSummaryLines(payload).join('\n');
 
-  return `ðŸ“… Data: ${formatDateBR(entry.date)}
+  return `📅 Data: ${formatDateBR(entry.date)}\n\n${emotionLines}\n😴 Horas de sono: ${payload.sleep_hours ?? 'Não informado'}\n🛌 Qualidade do sono: ${payload.sleep_quality ? payload.sleep_quality + '/5' : 'Não informado'}\n📝 Contexto: ${payload.day_context || 'Não informado'}\n✏️ Registro: ${payload.free_text || 'Não informado'}`;
+}
 
-${emotionLines}
-ðŸ˜´ Horas de sono: ${payload.sleep_hours ?? 'NÃ£o informado'}
-ðŸ›Œ Qualidade do sono: ${payload.sleep_quality ? payload.sleep_quality + '/5' : 'NÃ£o informado'}
-ðŸ“ Contexto: ${payload.day_context || 'NÃ£o informado'}
-âœï¸ Registro: ${payload.free_text || 'NÃ£o informado'}`;
+function formatEntryCompact(entry, analysis = null) {
+  if (!entry) return '';
+  const payload = applyLegacyEmotionFields(buildPayloadFromExistingEntry(entry, analysis));
+  const emotionConfigurations = Array.isArray(payload.emotion_configurations)
+    ? payload.emotion_configurations
+    : [];
+
+  if (emotionConfigurations.length) {
+    const parts = emotionConfigurations.slice(0, 3).map((config) => {
+      const score = payload.emotion_answers?.[config.emotion_type] ?? null;
+      if (score == null) return null;
+      const catalog = getEmotionCatalogDefinition(config.emotion_type);
+      const emojiSet = Array.isArray(config.emoji_set) && config.emoji_set.length
+        ? config.emoji_set
+        : (catalog?.emoji_set || []);
+      const emojiIndex = score - (config.scale_min ?? 1);
+      const emoji = emojiSet[emojiIndex] || '';
+      return `${config.display_name || config.emotion_type}: ${score}/${config.scale_max}${emoji ? ' ' + emoji : ''}`;
+    }).filter(Boolean);
+
+    return parts.length ? parts.join(' | ') : '';
+  }
+
+  const parts = [];
+  if (payload.mood_score != null) parts.push(`Humor: ${payload.mood_score}/5`);
+  if (payload.energy_level != null) parts.push(`Energia: ${payload.energy_level}/5`);
+  return parts.join(' | ');
 }
 
 function formatInitialDiaryMenu(lastData, todayData) {
@@ -1279,58 +1489,36 @@ function formatInitialDiaryMenu(lastData, todayData) {
   const hasToday = !!todayData?.entry;
 
   const lastText = hasLast
-    ? `Vi que seu Ãºltimo DiÃ¡rio Emocional foi registrado em ${formatDateBR(lastData.entry.date)}:\n\n${formatEntrySummary(lastData.entry, lastData.analysis)}`
-    : `Ainda nÃ£o encontrei registros anteriores do seu DiÃ¡rio Emocional.`;
+    ? (() => {
+        const compact = formatEntryCompact(lastData.entry, lastData.analysis);
+        return `Seu último Diário foi em ${formatDateBR(lastData.entry.date)}${compact ? ` — ${compact}` : ''}.`;
+      })()
+    : 'Ainda não encontrei registros anteriores do seu Diário Emocional.';
 
-  const todayHint = hasToday
-    ? `\n\nTambÃ©m encontrei um DiÃ¡rio Emocional registrado hoje.`
-    : `\n\nAinda nÃ£o encontrei um DiÃ¡rio Emocional registrado hoje.`;
+  if (!hasToday) {
+    return `Olá 💜\n\n${lastText}\n\nAinda não encontrei um Diário Emocional registrado hoje.\n\nO que você deseja fazer?\n\n1️⃣ Registrar Diário Emocional de hoje\n2️⃣ Registrar Diário Emocional de outro dia\n3️⃣ Ver meu último registro\n4️⃣ Cancelar`;
+  }
 
-  return `OlÃ¡ ðŸ’œ
-
-${lastText}${todayHint}
-
-O que vocÃª deseja fazer?
-
-1ï¸âƒ£ Registrar DiÃ¡rio Emocional de outro dia
-2ï¸âƒ£ Ajustar DiÃ¡rio Emocional de hoje
-3ï¸âƒ£ Registrar DiÃ¡rio Emocional de hoje
-4ï¸âƒ£ Manter como estÃ¡`;
+  return `Olá 💜\n\n${lastText}\n\nVocê já registrou seu Diário Emocional hoje.\n\nO que deseja fazer?\n\n1️⃣ Ver registro de hoje\n2️⃣ Ajustar registro de hoje\n3️⃣ Registrar outro dia\n4️⃣ Manter como está`;
 }
 
 function formatExistingEntryMessage(entry, analysis = null, label = 'dessa data') {
   const buddyMessage = analysis?.buddy_message
-    ? `\n\nðŸ’¬ Mensagem do Buddy:\n${analysis.buddy_message}`
+    ? `\n\n💬 Mensagem do Buddy:\n${analysis.buddy_message}`
     : '';
 
-  return `Encontrei um DiÃ¡rio Emocional ${label} ðŸ’œ
-
-Registro atual:
-
-${formatEntrySummary(entry, analysis)}${buddyMessage}
-
-O que vocÃª deseja fazer?
-
-1ï¸âƒ£ Mudar uma informaÃ§Ã£o
-2ï¸âƒ£ Reescrever do zero
-3ï¸âƒ£ Manter como estÃ¡`;
+  return `Encontrei um Diário Emocional ${label} 💜\n\nRegistro atual:\n\n${formatEntrySummary(entry, analysis)}${buddyMessage}\n\nO que você deseja fazer?\n\n1️⃣ Mudar uma informação\n2️⃣ Reescrever do zero\n3️⃣ Manter como está`;
 }
 
 function askDateForOtherDiary() {
-  return `Para qual dia vocÃª quer registrar o DiÃ¡rio Emocional?
-
-VocÃª pode responder assim:
-
-â€¢ hoje
-â€¢ ontem
-â€¢ segunda (ou segunda passada)
-â€¢ 25/04/2026
-
-Digite a data desejada.`;
+  return `Para qual dia você quer registrar o Diário Emocional?\n\nVocê pode responder assim:\n\n• hoje\n• ontem\n• segunda (ou segunda passada)\n• 25/04/2026\n\nDigite a data desejada.`;
 }
 
 async function buildDiaryStartPayload(userId, entryDate) {
-  const emotionConfigurations = await getUserEmotionConfigurations(userId);
+  const allEmotionConfigurations = await getUserEmotionConfigurations(userId);
+  const lastData = await getLastMoodEntryWithAnalysis(userId);
+  const trends = await getWeeklyEmotionTrends(userId);
+  const emotionConfigurations = pickEmotionConfigurationsForSession(allEmotionConfigurations, lastData, trends, 3);
 
   return {
     entry_date: entryDate,
@@ -1361,7 +1549,7 @@ function editFieldQuestion(payload = {}) {
     ? safePayload.emotion_configurations
     : [];
   const emotionAnswers = normalizeEmotionAnswers(safePayload.emotion_answers || {});
-  const lines = ['Qual informaÃ§Ã£o vocÃª quer mudar?', ''];
+  const lines = ['Qual informação você quer mudar?', ''];
   let index = 1;
 
   for (const config of emotionConfigurations) {
@@ -1374,19 +1562,19 @@ function editFieldQuestion(payload = {}) {
       ? 'nao informado'
       : `${score}/${config.scale_max}`;
 
-    lines.push(`${index}ï¸âƒ£ ${config.display_name || config.emotion_type} (atual: ${currentValue})`);
+    lines.push(`${index}️⃣ ${config.display_name || config.emotion_type} (atual: ${currentValue})`);
     index += 1;
   }
 
-  lines.push(`${index}ï¸âƒ£ Horas de sono`);
+  lines.push(`${index}️⃣ Horas de sono`);
   index += 1;
-  lines.push(`${index}ï¸âƒ£ Qualidade do sono`);
+  lines.push(`${index}️⃣ Qualidade do sono`);
   index += 1;
-  lines.push(`${index}ï¸âƒ£ Contexto do dia`);
+  lines.push(`${index}️⃣ Contexto do dia`);
   index += 1;
-  lines.push(`${index}ï¸âƒ£ Registro livre`);
+  lines.push(`${index}️⃣ Registro livre`);
   index += 1;
-  lines.push(`${index}ï¸âƒ£ Cancelar ediÃ§Ã£o`);
+  lines.push(`${index}️⃣ Voltar para revisão`);
 
   return lines.join('\n');
 }
@@ -1415,7 +1603,7 @@ function getEditFieldFromChoice(text, payload = {}) {
   if (t === String(base + 2) || t.includes('qualidade do sono')) return 'sleep_quality';
   if (t === String(base + 3) || t.includes('contexto')) return 'day_context';
   if (t === String(base + 4) || t.includes('registro')) return 'free_text';
-  if (t === String(base + 5)) return 'cancel';
+  if (t === String(base + 5) || t.includes('voltar')) return 'back_to_confirmation';
 
   if (t.includes('cancelar')) return 'cancel';
 
@@ -1431,48 +1619,50 @@ function questionForEditField(field, payload = {}) {
     const config = emotionConfigurations.find((item) => item.emotion_type === emotionType);
 
     if (config) {
-      return emotionQuestion(config, 0, 1).replace('(1/1) ', '');
+      return emotionQuestion(config, 0, 1, { showStageHeader: false }).replace('1/1 • ', '');
     }
 
-    return 'Me responda com um nÃºmero da escala configurada para essa emoÃ§Ã£o.';
+    return 'Me responda com um número da escala configurada para essa emoção.';
   }
 
   if (field === 'sleep_hours') return sleepHoursQuestion();
   if (field === 'sleep_quality') return sleepQualityQuestion();
 
   if (field === 'day_context') {
-    return `Me diga o novo contexto do seu dia.
-
-Exemplo: prova, trabalho, sono ruim, cansaÃ§o, apresentaÃ§Ã£o, conversa difÃ­cil, dia tranquilo.`;
+    return `Me diga o novo contexto do seu dia.\n\nExemplo: prova, trabalho, sono ruim, cansaço, apresentação, conversa difícil, dia tranquilo.`;
   }
 
   if (field === 'free_text') {
-    return `Escreva o novo registro livre sobre como vocÃª se sentiu.
-
-Se quiser deixar em branco, responda "pular".`;
+    return `Escreva o novo registro livre sobre como você se sentiu.\n\nSe quiser deixar em branco, responda "pular".`;
   }
 
-  return 'Me envie a nova informaÃ§Ã£o.';
+  return 'Me envie a nova informação.';
 }
 
-function confirmationMessage(payload, prefix = 'Seu DiÃ¡rio Emocional ficou assim:') {
+function confirmationMessage(payload, prefix = 'Seu Diário Emocional ficou assim:') {
   const safePayload = applyLegacyEmotionFields(payload);
   const emotionLines = formatEmotionSummaryLines(safePayload).join('\n');
 
-  return `${prefix}
+  return `${buildStageHeader(4, 4, 'Revisão')}\n\n${prefix}\n\n📅 Data: ${formatDateBR(safePayload.entry_date || todayISO())}\n${emotionLines}\n😴 Horas de sono: ${safePayload.sleep_hours ?? 'não informado'}\n🛌 Qualidade do sono: ${safePayload.sleep_quality ? safePayload.sleep_quality + '/5' : 'não informado'}\n📝 Contexto: ${safePayload.day_context || 'Não informado'}\n✏️ Registro: ${safePayload.free_text || 'Não informado'}\n\nDeseja salvar?\n1️⃣ Sim, salvar\n2️⃣ Ajustar uma resposta\n3️⃣ Refazer tudo\n4️⃣ Cancelar`;
+}
 
-ðŸ“… Data: ${formatDateBR(safePayload.entry_date || todayISO())}
-${emotionLines}
-ðŸ˜´ Horas de sono: ${safePayload.sleep_hours ?? 'nÃ£o informado'}
-ðŸ›Œ Qualidade do sono: ${safePayload.sleep_quality ? safePayload.sleep_quality + '/5' : 'nÃ£o informado'}
-ðŸ“ Contexto: ${safePayload.day_context || 'NÃ£o informado'}
-âœï¸ Registro: ${safePayload.free_text || 'NÃ£o informado'}
+function formatStreakMessage(streak, total) {
+  const parts = [];
 
-Deseja salvar?
-1ï¸âƒ£ Sim, salvar
-2ï¸âƒ£ Refazer
-3ï¸âƒ£ Cancelar
-4ï¸âƒ£ Voltar`;
+  if (streak >= 7) {
+    parts.push(`\n\n🔥 ${streak} dias seguidos! Que consistência incrível!`);
+  } else if (streak >= 2) {
+    parts.push(`\n\n🔥 ${streak} dias seguidos!`);
+  } else if (total === 1) {
+    parts.push('\n\n🌱 Este é o seu primeiro registro! Que começo lindo!');
+  }
+
+  const milestones = [7, 14, 30, 60, 100];
+  if (milestones.includes(total)) {
+    parts.push(`\n\n🏆 ${total} registros no Diário Emocional! Você está construindo algo que vale muito.`);
+  }
+
+  return parts.join('');
 }
 
 async function getCurrentProfileTenant(userId) {
@@ -1484,15 +1674,189 @@ async function getCurrentProfileTenant(userId) {
   return rows?.[0]?.tenant_id || null;
 }
 
+async function saveReminderPreference(phone, userId, tenantId, enabled = true) {
+  try {
+    await supabase('whatsapp_reminder_preferences?on_conflict=phone', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates,return=representation',
+      body: JSON.stringify({
+        phone,
+        user_id: userId,
+        tenant_id: tenantId,
+        is_enabled: enabled,
+        updated_at: new Date().toISOString()
+      })
+    });
+  } catch (e) {}
+}
+
+async function getReminderPreference(phone) {
+  try {
+    const rows = await supabase(
+      `whatsapp_reminder_preferences?phone=eq.${encodeURIComponent(phone)}&select=is_enabled&limit=1`,
+      { method: 'GET' }
+    );
+
+    return rows?.[0]?.is_enabled ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getWeeklyEmotionTrends(userId) {
+  try {
+    const sevenDaysAgo = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() - 6);
+      return d.toISOString().slice(0, 10);
+    })();
+
+    const rows = await supabase(
+      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level,emotion_values&order=date.asc`,
+      { method: 'GET' }
+    );
+
+    if (!Array.isArray(rows) || !rows.length) return {};
+
+    const trends = {
+      mood: { values: [], avg: null, min: null, max: null, variance: null },
+      energy: { values: [], avg: null, min: null, max: null, variance: null },
+      anxiety: { values: [], avg: null, min: null, max: null, variance: null }
+    };
+
+    const emotionValues = {};
+
+    for (const row of rows) {
+      if (row.mood_score != null) trends.mood.values.push(row.mood_score);
+      if (row.energy_level != null) trends.energy.values.push(row.energy_level);
+      if (row.anxiety_level != null) trends.anxiety.values.push(row.anxiety_level);
+
+      const entryEmotions = row.emotion_values || {};
+      for (const [key, val] of Object.entries(entryEmotions)) {
+        if (!emotionValues[key]) emotionValues[key] = [];
+        if (Number.isFinite(Number(val))) emotionValues[key].push(Number(val));
+      }
+    }
+
+    for (const key of ['mood', 'energy', 'anxiety']) {
+      const values = trends[key].values;
+      if (values.length) {
+        trends[key].min = Math.min(...values);
+        trends[key].max = Math.max(...values);
+        trends[key].avg = values.reduce((a, b) => a + b, 0) / values.length;
+        const avgSquaredDiff = values.reduce((sum, val) => sum + Math.pow(val - trends[key].avg, 2), 0);
+        trends[key].variance = avgSquaredDiff / values.length;
+      }
+    }
+
+    for (const [emotionType, values] of Object.entries(emotionValues)) {
+      if (values.length) {
+        const avg = values.reduce((a, b) => a + b, 0) / values.length;
+        const variance = values.reduce((sum, val) => sum + Math.pow(val - avg, 2), 0) / values.length;
+        emotionValues[emotionType] = { values, avg, variance };
+      }
+    }
+
+    return { basics: trends, custom: emotionValues };
+  } catch (_) {
+    return {};
+  }
+}
+
+async function getUserStreak(userId) {
+  try {
+    const rows = await supabase(
+      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&select=date&order=date.desc&limit=120`,
+      { method: 'GET' }
+    );
+
+    if (!Array.isArray(rows) || !rows.length) return 0;
+
+    const dates = [...new Set(rows.map((r) => r.date).filter(Boolean))].sort().reverse();
+    let streak = 0;
+    let expected = todayISO();
+
+    for (const d of dates) {
+      if (d === expected) {
+        streak += 1;
+        const dt = new Date(expected + 'T00:00:00Z');
+        dt.setUTCDate(dt.getUTCDate() - 1);
+        expected = dt.toISOString().slice(0, 10);
+      } else if (d < expected) {
+        break;
+      }
+    }
+
+    return streak;
+  } catch (_) {
+    return 0;
+  }
+}
+
+async function getUserTotalEntries(userId) {
+  try {
+    const rows = await supabase(
+      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&select=date`,
+      { method: 'GET' }
+    );
+
+    return Array.isArray(rows) ? rows.length : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+async function buildWeeklySummaryMessage(userId) {
+  try {
+    const sevenDaysAgo = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() - 6);
+      return d.toISOString().slice(0, 10);
+    })();
+
+    const rows = await supabase(
+      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level&order=date.asc`,
+      { method: 'GET' }
+    );
+
+    if (!Array.isArray(rows) || !rows.length) {
+      return 'Ainda não encontrei registros nos últimos 7 dias 💜 Que tal fazer seu primeiro registro hoje? Envie *diário*!';
+    }
+
+    const lines = ['📊 *Seu resumo dos últimos 7 dias* 💜', ''];
+
+    for (const row of rows) {
+      const mood = row.mood_score != null ? `Humor ${row.mood_score}/5` : null;
+      const energy = row.energy_level != null ? `Energia ${row.energy_level}/5` : null;
+      const parts = [mood, energy].filter(Boolean).join(', ');
+      lines.push(`📅 ${formatDateBR(row.date)}: ${parts || 'sem scores registrados'}`);
+    }
+
+    const moodScores = rows.map((r) => r.mood_score).filter((v) => v != null);
+    if (moodScores.length >= 2) {
+      const avg = (moodScores.reduce((a, b) => a + b, 0) / moodScores.length).toFixed(1);
+      lines.push('');
+      lines.push(`Média de humor: ${avg}/5`);
+    }
+
+    const streak = await getUserStreak(userId);
+    if (streak >= 2) lines.push(`🔥 Sequência atual: ${streak} dias seguidos`);
+
+    return lines.join('\n');
+  } catch (_) {
+    return 'Não consegui buscar seu resumo agora. Tente novamente em instantes 💜';
+  }
+}
+
 async function saveMoodEntry(link, payload, buddyMessage, riskLevel, rawPayload = {}) {
   const safePayload = applyLegacyEmotionFields(payload || {});
   const targetDate = safePayload.entry_date || todayISO();
 
   // Fonte da verdade do tenant: profiles.tenant_id.
-  // Evita salvar diÃ¡rio/anÃ¡lise com tenant antigo caso o aluno tenha sido movido de instituiÃ§Ã£o.
+  // Evita salvar diário/análise com tenant antigo caso o aluno tenha sido movido de instituição.
   const currentTenantId = (await getCurrentProfileTenant(link.user_id)) || link.tenant_id || null;
 
-  // Se o vÃ­nculo WhatsApp estiver com tenant antigo, atualiza para manter consistÃªncia.
+  // Se o vínculo WhatsApp estiver com tenant antigo, atualiza para manter consistência.
   if (currentTenantId && currentTenantId !== link.tenant_id) {
     await supabase(
       `whatsapp_profile_links?phone=eq.${encodeURIComponent(link.phone)}`,
@@ -1508,9 +1872,7 @@ async function saveMoodEntry(link, payload, buddyMessage, riskLevel, rawPayload 
     link.tenant_id = currentTenantId;
   }
 
-  const journalText = `Contexto do dia: ${safePayload.day_context || 'NÃ£o informado'}.
-Registro livre: ${safePayload.free_text || 'NÃ£o informado'}.
-Canal: WhatsApp.`;
+  const journalText = `Contexto do dia: ${safePayload.day_context || 'Não informado'}.\nRegistro livre: ${safePayload.free_text || 'Não informado'}.\nCanal: WhatsApp.`;
 
   const emotionAnswers = normalizeEmotionAnswers(safePayload.emotion_answers || {});
 
@@ -1571,7 +1933,7 @@ Canal: WhatsApp.`;
   }
 
   if (!moodEntry?.id) {
-    throw new Error('NÃ£o foi possÃ­vel recuperar o id da entrada em mood_entries.');
+    throw new Error('Não foi possível recuperar o id da entrada em mood_entries.');
   }
 
   const analysisPayload = {
@@ -1579,10 +1941,10 @@ Canal: WhatsApp.`;
     user_id: link.user_id,
     risk_level: riskLevel,
     buddy_message: buddyMessage,
-    source: 'evolution_api',
+    source: 'Diario Emocional - Whatsapp',
     raw_payload: {
       channel: 'whatsapp',
-      source: 'evolution_api',
+      source: 'Diario Emocional - Whatsapp',
       entry_date: targetDate,
       tenant_id: currentTenantId,
       context: safePayload.day_context || null,
@@ -1627,7 +1989,7 @@ try {
 const msg = extractPayload(body);
 
 if (!msg.phone) {
-  return [{ json: { ok: false, error: 'Telefone nÃ£o encontrado no payload da Evolution API.' } }];
+  return [{ json: { ok: false, error: 'Telefone não encontrado no payload da Evolution API.' } }];
 }
 
 const dedup = await registerInboundMessage(msg.phone, msg.messageId, msg.raw);
@@ -1651,7 +2013,7 @@ await logMessage(msg.phone, 'inbound', msg.text, {
 if (!msg.text) {
   await sendWhatsApp(
     msg.phone,
-    'Recebi sua mensagem, mas nÃ£o consegui ler o texto. Para abrir seu DiÃ¡rio Emocional, envie "diÃ¡rio".'
+    'Recebi sua mensagem, mas não consegui ler o texto. Para abrir seu Diário Emocional, envie "diário".'
   );
 
   return [{ json: { ok: true } }];
@@ -1662,7 +2024,7 @@ if (isCancel(msg.textLower)) {
 
   await sendWhatsApp(
     msg.phone,
-    'Tudo bem, fluxo reiniciado ðŸ’œ Quando quiser abrir o DiÃ¡rio Emocional, envie "diÃ¡rio".'
+    'Tudo bem, fluxo reiniciado 💜 Quando quiser abrir o Diário Emocional, envie "diário".'
   );
 
   return [{ json: { ok: true } }];
@@ -1728,7 +2090,7 @@ if (!link) {
     if (!isStartCommand(msg.textLower)) {
       await sendWhatsApp(
         msg.phone,
-        'Oi ðŸ’œ Para abrir seu DiÃ¡rio Emocional, envie "diÃ¡rio".'
+        'Oi 💜 Para abrir seu Diário Emocional, envie "diário".'
       );
 
       return [{ json: { ok: true } }];
@@ -1738,11 +2100,7 @@ if (!link) {
 
     await sendWhatsApp(
       msg.phone,
-      `Oi! Eu sou o Buddy da Rede Bem-Estar ðŸ’œ
-
-Para proteger seu DiÃ¡rio Emocional, preciso confirmar sua identidade no primeiro acesso.
-
-Digite seu e-mail cadastrado na Rede Bem-Estar.`
+      `Oi! Eu sou o Buddy da Rede Bem-Estar 💜\n\nPara proteger seu Diário Emocional, preciso confirmar sua identidade no primeiro acesso.\n\nDigite seu e-mail cadastrado na Rede Bem-Estar.`
     );
 
     return [{ json: { ok: true } }];
@@ -1754,53 +2112,82 @@ Digite seu e-mail cadastrado na Rede Bem-Estar.`
     if (!isEmail(email)) {
       await sendWhatsApp(
         msg.phone,
-        'Esse e-mail nÃ£o parece vÃ¡lido. Digite o e-mail cadastrado na Rede Bem-Estar.'
+        'Esse e-mail não parece válido. Digite o e-mail cadastrado na Rede Bem-Estar.'
       );
 
       return [{ json: { ok: true } }];
     }
 
-    const profile = await getProfileByEmail(email);
+    let authStep = 'profile_lookup';
 
-    if (!profile) {
+    try {
+      const profile = await getProfileByEmail(email);
+
+      if (!profile) {
+        await sendWhatsApp(
+          msg.phone,
+          'Não encontrei esse e-mail no cadastro da Rede Bem-Estar. Confira o endereço ou fale com o suporte da instituição.'
+        );
+
+        return [{ json: { ok: true } }];
+      }
+
+      const code = newOtp();
+
+      authStep = 'otp_hash';
+      const codeHash = await hashCode(code);
+
+      authStep = 'otp_save';
+      await saveOtp(email, msg.phone, codeHash);
+
+      authStep = 'otp_email';
+      await sendEmailOtp(email, code);
+
+      authStep = 'state_update';
+      await upsertState(
+        msg.phone,
+        'WAITING_OTP',
+        {
+          email,
+          user_id: profile.user_id,
+          profile_id: profile.id,
+          tenant_id: profile.tenant_id,
+          nome: profile.nome
+        },
+        {
+          user_id: profile.user_id,
+          profile_id: profile.id,
+          tenant_id: profile.tenant_id
+        }
+      );
+
       await sendWhatsApp(
         msg.phone,
-        'NÃ£o encontrei esse e-mail no cadastro da Rede Bem-Estar. Confira o endereÃ§o ou fale com o suporte da instituiÃ§Ã£o.'
+        `Enviei um código de verificação para seu e-mail.\n\nDigite aqui o código de 6 dígitos para continuar. Ele expira em 10 minutos.`
       );
 
       return [{ json: { ok: true } }];
+    } catch (e) {
+      const code = String(e?.code || e?.message || '');
+      const isProviderError = code.includes('EMAIL_PROVIDER_NOT_CONFIGURED');
+      const isHashError = code.includes('OTP_HASH_UNAVAILABLE');
+
+      await sendWhatsApp(
+        msg.phone,
+        isProviderError || isHashError
+          ? 'Não consegui enviar seu código de verificação agora. Pode tentar novamente em instantes? 💜'
+          : 'Tive uma instabilidade aqui e não consegui processar agora. Pode tentar novamente em instantes? 💜'
+      );
+
+      return [{
+        json: {
+          ok: false,
+          error: 'AUTH_EMAIL_STEP_FAILED',
+          auth_step: authStep,
+          debug_message: e?.message || 'no message'
+        }
+      }];
     }
-
-    const code = newOtp();
-
-    await saveOtp(email, msg.phone, hashCode(code));
-    await sendEmailOtp(email, code);
-
-    await upsertState(
-      msg.phone,
-      'WAITING_OTP',
-      {
-        email,
-        user_id: profile.user_id,
-        profile_id: profile.id,
-        tenant_id: profile.tenant_id,
-        nome: profile.nome
-      },
-      {
-        user_id: profile.user_id,
-        profile_id: profile.id,
-        tenant_id: profile.tenant_id
-      }
-    );
-
-    await sendWhatsApp(
-      msg.phone,
-      `Enviei um cÃ³digo de verificaÃ§Ã£o para seu e-mail.
-
-Digite aqui o cÃ³digo de 6 dÃ­gitos para continuar. Ele expira em 10 minutos.`
-    );
-
-    return [{ json: { ok: true } }];
   }
 
   if (state.current_step === 'WAITING_OTP') {
@@ -1812,7 +2199,7 @@ Digite aqui o cÃ³digo de 6 dÃ­gitos para continuar. Ele expira em 10 minutos
 
       await sendWhatsApp(
         msg.phone,
-        'Seu cÃ³digo expirou. Para comeÃ§ar novamente, envie "diÃ¡rio".'
+        'Seu código expirou. Para começar novamente, envie "diário".'
       );
 
       return [{ json: { ok: true } }];
@@ -1823,18 +2210,38 @@ Digite aqui o cÃ³digo de 6 dÃ­gitos para continuar. Ele expira em 10 minutos
 
       await sendWhatsApp(
         msg.phone,
-        'Muitas tentativas incorretas. Por seguranÃ§a, comece novamente enviando "diÃ¡rio".'
+        'Muitas tentativas incorretas. Por segurança, comece novamente enviando "diário".'
       );
 
       return [{ json: { ok: true } }];
     }
 
-    if (hashCode(msg.text.trim()) !== otp.code_hash) {
+    let providedCodeHash;
+
+    try {
+      providedCodeHash = await hashCode(msg.text.trim());
+    } catch (e) {
+      await sendWhatsApp(
+        msg.phone,
+        'Não consegui validar seu código agora. Pode tentar novamente em instantes? 💜'
+      );
+
+      return [{
+        json: {
+          ok: false,
+          error: 'OTP_HASH_UNAVAILABLE',
+          auth_step: 'otp_verify_hash',
+          debug_message: e?.message || 'no message'
+        }
+      }];
+    }
+
+    if (providedCodeHash !== otp.code_hash) {
       await patchOtp(otp.id, { attempts: (otp.attempts || 0) + 1 });
 
       await sendWhatsApp(
         msg.phone,
-        'CÃ³digo incorreto. Confira o e-mail e tente novamente.'
+        'Código incorreto. Confira o e-mail e tente novamente.'
       );
 
       return [{ json: { ok: true } }];
@@ -1852,14 +2259,27 @@ Digite aqui o cÃ³digo de 6 dÃ­gitos para continuar. Ele expira em 10 minutos
 
     link = await getLink(msg.phone);
 
-    await clearState(msg.phone);
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+
+    await upsertState(
+      msg.phone,
+      'WAITING_INITIAL_DIARY_MENU',
+      {
+        has_today_entry: !!todayData?.entry,
+        today_entry_id: todayData?.entry?.id || null,
+        last_entry_id: lastData?.entry?.id || null
+      },
+      link,
+      state?.updated_at || null
+    );
 
     await sendWhatsApp(
       msg.phone,
-      `Identidade confirmada com seguranÃ§a ðŸ’œ
-
-Agora envie "diÃ¡rio" para abrir seu DiÃ¡rio Emocional.`
+      'Identidade confirmada com segurança 💜\n\nVamos abrir seu Diário Emocional.'
     );
+
+    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
 
     return [{ json: { ok: true } }];
   }
@@ -1868,7 +2288,7 @@ Agora envie "diÃ¡rio" para abrir seu DiÃ¡rio Emocional.`
 
   await sendWhatsApp(
     msg.phone,
-    'Vamos comeÃ§ar de novo. Envie "diÃ¡rio" para abrir seu DiÃ¡rio Emocional.'
+    'Vamos começar de novo. Envie "diário" para abrir seu Diário Emocional.'
   );
 
   return [{ json: { ok: true } }];
@@ -1876,11 +2296,102 @@ Agora envie "diÃ¡rio" para abrir seu DiÃ¡rio Emocional.`
 
 await touchLink(msg.phone);
 
+if (state && SESSION_STALE_HOURS > 0) {
+  const staleThresholdMs = SESSION_STALE_HOURS * 60 * 60 * 1000;
+  const stateAgeMs = Date.now() - new Date(state.updated_at).getTime();
+
+  if (stateAgeMs > staleThresholdMs) {
+    const hoursAgo = Math.max(1, Math.round(stateAgeMs / (60 * 60 * 1000)));
+    await sendWhatsApp(
+      msg.phone,
+      `💜 Sua sessão estava pausada há ${hoursAgo}h. Continuando de onde parou...`
+    );
+  }
+}
+
+if (isHelp(msg.textLower)) {
+  const currentStep = state?.current_step || null;
+  const backSteps = ['WAITING_EMOTION_SCORE', 'WAITING_SLEEP_HOURS', 'WAITING_SLEEP_QUALITY', 'WAITING_CONTEXT', 'WAITING_FREE_TEXT'];
+  const helpLines = [
+    '💜 Comandos disponíveis:',
+    '',
+    '• *diário* — abrir o Diário Emocional',
+    '• *cancelar* — encerrar o fluxo atual'
+  ];
+
+  if (currentStep && backSteps.includes(currentStep)) {
+    helpLines.push('• *voltar* — retornar ao campo anterior');
+  }
+
+  helpLines.push('• *registrar hoje* — iniciar o diário de hoje');
+  helpLines.push('• *ajustar hoje* — editar o diário de hoje');
+  helpLines.push('• *último registro* — ver seu último diário');
+  helpLines.push('• *insights* (ou *resumo*) — ver resumo da semana');
+  helpLines.push('• *ativar lembretes* — receber lembretes diários');
+  helpLines.push('• *desativar lembretes* — pausar lembretes');
+  helpLines.push('• *ajuda* — ver esta mensagem');
+
+  await sendWhatsApp(msg.phone, helpLines.join('\n'));
+  return [{ json: { ok: true } }];
+}
+
+if (isResumo(msg.textLower) || isInsightsCommand(msg.textLower)) {
+  const summaryMsg = await buildWeeklySummaryMessage(link.user_id);
+  await sendWhatsApp(msg.phone, summaryMsg);
+  return [{ json: { ok: true } }];
+}
+
+if (isUltimoRegistroCommand(msg.textLower)) {
+  const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+
+  if (!lastData?.entry) {
+    await sendWhatsApp(msg.phone, 'Ainda não encontrei registros anteriores no seu Diário Emocional.');
+    return [{ json: { ok: true } }];
+  }
+
+  await sendWhatsApp(msg.phone, `Seu último registro 💜\n\n${formatEntrySummary(lastData.entry, lastData.analysis)}`);
+  return [{ json: { ok: true } }];
+}
+
+if (isAjustarHojeCommand(msg.textLower)) {
+  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+
+  if (!todayData?.entry) {
+    const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
+    await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
+    await sendWhatsApp(msg.phone, `Ainda não encontrei um Diário Emocional registrado hoje. Vamos criar agora 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`);
+    return [{ json: { ok: true } }];
+  }
+
+  const existingPayload = buildPayloadFromExistingEntry(todayData.entry, todayData.analysis);
+  await upsertState(
+    msg.phone,
+    'WAITING_EXISTING_ENTRY_CHOICE',
+    {
+      existing_mood_entry_id: todayData.entry.id,
+      existing_analysis_id: todayData.analysis?.id || null,
+      entry_date: todayISO(),
+      ...existingPayload
+    },
+    link
+  );
+
+  await sendWhatsApp(msg.phone, formatExistingEntryMessage(todayData.entry, todayData.analysis, 'de hoje'));
+  return [{ json: { ok: true } }];
+}
+
+if (isRegistrarHojeCommand(msg.textLower)) {
+  const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
+  await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
+  await sendWhatsApp(msg.phone, `Vamos registrar seu Diário Emocional de hoje 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`);
+  return [{ json: { ok: true } }];
+}
+
 if (!state) {
   if (!isStartCommand(msg.textLower)) {
     await sendWhatsApp(
       msg.phone,
-      'Oi ðŸ’œ Para abrir seu DiÃ¡rio Emocional, envie "diÃ¡rio".'
+      'Oi 💜 Para abrir seu Diário Emocional, envie "diário".'
     );
 
     return [{ json: { ok: true } }];
@@ -1912,31 +2423,35 @@ const payload = state.payload || {};
 
 if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   const choice = msg.textLower;
+  const hasTodayEntry = payload.has_today_entry === true;
 
-  if (choice === '1' || choice.includes('outro')) {
-    await upsertState(msg.phone, 'WAITING_OTHER_DIARY_DATE', payload, link);
-    await sendWhatsApp(msg.phone, askDateForOtherDiary());
+  if (choice === '3' || choice.includes('outro')) {
+    if (hasTodayEntry) {
+      await upsertState(msg.phone, 'WAITING_OTHER_DIARY_DATE', payload, link);
+      await sendWhatsApp(msg.phone, askDateForOtherDiary());
+      return [{ json: { ok: true } }];
+    }
+
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+    if (!lastData?.entry) {
+      await sendWhatsApp(msg.phone, 'Ainda não encontrei registros anteriores. Vamos criar seu primeiro Diário Emocional de hoje? 💜');
+      return [{ json: { ok: true } }];
+    }
+
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+    await sendWhatsApp(
+      msg.phone,
+      `Seu último registro foi este 💜\n\n${formatEntrySummary(lastData.entry, lastData.analysis)}`
+    );
+    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
     return [{ json: { ok: true } }];
   }
 
-  if (choice === '2' || choice.includes('ajustar') || choice.includes('editar')) {
+  if ((choice === '2' || choice.includes('ajustar') || choice.includes('editar')) && hasTodayEntry) {
     const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
 
     if (!todayData?.entry) {
-      const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
-
-      await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
-
-      const firstEmotion = startPayload.emotion_configurations[0];
-      await sendWhatsApp(
-        msg.phone,
-        `Ainda nÃ£o encontrei um DiÃ¡rio Emocional registrado hoje.
-
-Vamos criar o de hoje agora ðŸ’œ
-
-${emotionQuestion(firstEmotion, 0, startPayload.emotion_configurations.length)}`
-      );
-
+      await sendWhatsApp(msg.phone, 'Não encontrei um registro de hoje para ajustar.');
       return [{ json: { ok: true } }];
     }
 
@@ -1962,16 +2477,33 @@ ${emotionQuestion(firstEmotion, 0, startPayload.emotion_configurations.length)}`
     return [{ json: { ok: true } }];
   }
 
-  if (choice === '3' || choice.includes('hoje')) {
+  if ((choice === '2' || choice.includes('outro')) && !hasTodayEntry) {
+    await upsertState(msg.phone, 'WAITING_OTHER_DIARY_DATE', payload, link);
+    await sendWhatsApp(msg.phone, askDateForOtherDiary());
+    return [{ json: { ok: true } }];
+  }
+
+  if ((choice === '1' || choice.includes('hoje')) && hasTodayEntry) {
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+
+    if (todayData?.entry) {
+      await sendWhatsApp(
+        msg.phone,
+        `Seu registro de hoje 💜\n\n${formatEntrySummary(todayData.entry, todayData.analysis)}`
+      );
+      await sendWhatsApp(msg.phone, formatInitialDiaryMenu(await getLastMoodEntryWithAnalysis(link.user_id), todayData));
+      return [{ json: { ok: true } }];
+    }
+  }
+
+  if (choice === '1' || choice.includes('hoje') || (hasTodayEntry && choice.includes('registrar'))) {
     const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
 
     await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
 
     await sendWhatsApp(
       msg.phone,
-      `Vamos registrar seu DiÃ¡rio Emocional de hoje ðŸ’œ
-
-${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
+      `Vamos registrar seu Diário Emocional de hoje 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
     );
 
     return [{ json: { ok: true } }];
@@ -1987,7 +2519,7 @@ ${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotio
 
     await sendWhatsApp(
       msg.phone,
-      'Tudo certo ðŸ’œ Mantive seus registros como estÃ£o. Quando quiser abrir o DiÃ¡rio Emocional novamente, envie "diÃ¡rio".'
+      'Tudo certo 💜 Mantive seus registros como estão. Quando quiser abrir o Diário Emocional novamente, envie "diário".'
     );
 
     return [{ json: { ok: true } }];
@@ -2006,14 +2538,7 @@ if (state.current_step === 'WAITING_OTHER_DIARY_DATE') {
   if (!selectedDate) {
     await sendWhatsApp(
       msg.phone,
-      `NÃ£o consegui entender a data. ðŸ˜•
-
-VocÃª pode responder assim:
-â€¢ hoje
-â€¢ ontem
-â€¢ segunda, terÃ§a, quarta...
-â€¢ segunda passada, sexta passada...
-â€¢ 25/04/2026`
+      `Não consegui entender a data. 😕\n\nVocê pode responder assim:\n• hoje\n• ontem\n• segunda, terça, quarta...\n• segunda passada, sexta passada...\n• 25/04/2026`
     );
 
     return [{ json: { ok: true } }];
@@ -2022,7 +2547,7 @@ VocÃª pode responder assim:
   if (isFutureDate(selectedDate)) {
     await sendWhatsApp(
       msg.phone,
-      'Essa data ainda nÃ£o chegou. Para o DiÃ¡rio Emocional, escolha hoje ou uma data anterior.'
+      'Essa data ainda não chegou. Para o Diário Emocional, escolha hoje ou uma data anterior.'
     );
 
     return [{ json: { ok: true } }];
@@ -2063,9 +2588,7 @@ VocÃª pode responder assim:
 
   await sendWhatsApp(
     msg.phone,
-    `Certo ðŸ’œ Vamos registrar seu DiÃ¡rio Emocional de ${formatDateBR(selectedDate)}.
-
-${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
+    `Certo 💜 Vamos registrar seu Diário Emocional de ${formatDateBR(selectedDate)}.\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
   );
 
   return [{ json: { ok: true } }];
@@ -2105,9 +2628,7 @@ if (state.current_step === 'WAITING_EXISTING_ENTRY_CHOICE') {
 
     await sendWhatsApp(
       msg.phone,
-      `Sem problema. Vamos reescrever esse DiÃ¡rio Emocional do zero ðŸ’œ
-
-${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
+      `Sem problema. Vamos reescrever esse Diário Emocional do zero 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
     );
 
     return [{ json: { ok: true } }];
@@ -2123,7 +2644,7 @@ ${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotio
 
     await sendWhatsApp(
       msg.phone,
-      'Tudo certo ðŸ’œ Mantive esse DiÃ¡rio Emocional como estÃ¡.'
+      'Tudo certo 💜 Mantive esse Diário Emocional como está.'
     );
 
     return [{ json: { ok: true } }];
@@ -2131,11 +2652,7 @@ ${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotio
 
   await sendWhatsApp(
     msg.phone,
-    `Me responda com uma das opÃ§Ãµes:
-
-1ï¸âƒ£ Mudar uma informaÃ§Ã£o
-2ï¸âƒ£ Reescrever do zero
-3ï¸âƒ£ Manter como estÃ¡`
+    `Me responda com uma das opções:\n\n1️⃣ Mudar uma informação\n2️⃣ Reescrever do zero\n3️⃣ Manter como está`
   );
 
   return [{ json: { ok: true } }];
@@ -2144,36 +2661,27 @@ ${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotio
 if (state.current_step === 'WAITING_EDIT_FIELD') {
   const editField = getEditFieldFromChoice(msg.textLower, payload);
 
-  if (isGoBack(msg.textLower)) {
-    await upsertState(msg.phone, 'WAITING_EXISTING_ENTRY_CHOICE', payload, link);
-    await sendWhatsApp(
-      msg.phone,
-      formatExistingEntryMessage(
-        { date: payload.entry_date, mood_score: payload.mood_score, energy_level: payload.energy_level, anxiety_level: payload.anxiety_level, sleep_hours: payload.sleep_hours, sleep_quality: payload.sleep_quality, journal_text: null },
-        null,
-        `de ${formatDateBR(payload.entry_date || todayISO())}`
-      )
-    );
-    return [{ json: { ok: true } }];
-  }
-
   if (editField === 'cancel') {
     await clearState(msg.phone);
 
     await sendWhatsApp(
       msg.phone,
-      'EdiÃ§Ã£o cancelada ðŸ’œ Mantive seu DiÃ¡rio Emocional como estava.'
+      'Edição cancelada 💜 Mantive seu Diário Emocional como estava.'
     );
 
+    return [{ json: { ok: true } }];
+  }
+
+  if (editField === 'back_to_confirmation') {
+    await upsertState(msg.phone, 'WAITING_CONFIRMATION', payload, link);
+    await sendWhatsApp(msg.phone, confirmationMessage(payload));
     return [{ json: { ok: true } }];
   }
 
   if (!editField) {
     await sendWhatsApp(
       msg.phone,
-      `NÃ£o consegui identificar qual campo vocÃª quer mudar.
-
-${editFieldQuestion(payload)}`
+      `Não consegui identificar qual campo você quer mudar.\n\n${editFieldQuestion(payload)}`
     );
 
     return [{ json: { ok: true } }];
@@ -2196,22 +2704,12 @@ ${editFieldQuestion(payload)}`
 if (state.current_step === 'WAITING_EDIT_VALUE') {
   const editField = payload.edit_field;
 
-  if (isGoBack(msg.textLower)) {
-    const backPayload = { ...payload };
-    delete backPayload.edit_field;
-    await upsertState(msg.phone, 'WAITING_EDIT_FIELD', backPayload, link);
-    await sendWhatsApp(msg.phone, `↩️ Voltando à seleção de campo.\n\n${editFieldQuestion(backPayload)}`);
-    return [{ json: { ok: true } }];
-  }
-
   if (!editField) {
     await upsertState(msg.phone, 'WAITING_EDIT_FIELD', payload, link);
 
     await sendWhatsApp(
       msg.phone,
-      `NÃ£o encontrei qual campo estava sendo editado.
-
-${editFieldQuestion(payload)}`
+      `Não encontrei qual campo estava sendo editado.\n\n${editFieldQuestion(payload)}`
     );
 
     return [{ json: { ok: true } }];
@@ -2233,9 +2731,7 @@ ${editFieldQuestion(payload)}`
     if (!n) {
       await sendWhatsApp(
         msg.phone,
-        `Me responda com um nÃºmero entre ${scaleMin} e ${scaleMax}, por favor ðŸ’œ
-
-${questionForEditField(editField, payload)}`
+        `Me responda com um número entre ${scaleMin} e ${scaleMax}, por favor 💜\n\n${questionForEditField(editField, payload)}`
       );
 
       return [{ json: { ok: true } }];
@@ -2255,9 +2751,7 @@ ${questionForEditField(editField, payload)}`
     if (parsed.error) {
       await sendWhatsApp(
         msg.phone,
-        `âŒ Valor invÃ¡lido.
-
-    ${questionForEditField(editField, payload)}`
+        `❌ Valor inválido.\n\n    ${questionForEditField(editField, payload)}`
       );
 
       return [{ json: { ok: true } }];
@@ -2270,9 +2764,7 @@ ${questionForEditField(editField, payload)}`
     if (parsed.error) {
       await sendWhatsApp(
         msg.phone,
-        `âŒ Valor invÃ¡lido.
-
-    ${questionForEditField(editField, payload)}`
+        `❌ Valor inválido.\n\n    ${questionForEditField(editField, payload)}`
       );
 
       return [{ json: { ok: true } }];
@@ -2280,7 +2772,7 @@ ${questionForEditField(editField, payload)}`
 
     updatedPayload.sleep_quality = parsed.value;
   } else if (editField === 'free_text') {
-    updatedPayload.free_text = ['pular', 'nÃ£o', 'nao', 'n'].includes(msg.textLower)
+    updatedPayload.free_text = ['pular', 'não', 'nao', 'n'].includes(msg.textLower)
       ? ''
       : msg.text.trim();
   } else if (editField === 'day_context') {
@@ -2291,7 +2783,7 @@ ${questionForEditField(editField, payload)}`
 
   await sendWhatsApp(
     msg.phone,
-    confirmationMessage(updatedPayload, 'Atualizei essa informaÃ§Ã£o. Seu DiÃ¡rio Emocional ficou assim:')
+    confirmationMessage(updatedPayload, 'Atualizei essa informação. Seu Diário Emocional ficou assim:')
   );
 
   return [{ json: { ok: true } }];
@@ -2300,37 +2792,18 @@ ${questionForEditField(editField, payload)}`
 if (state.current_step === 'WAITING_EMOTION_SCORE') {
   const { emotionConfigurations, cursor, currentConfig } = getCurrentEmotionConfig(payload);
 
-  if (isGoBack(msg.textLower)) {
+  if (isBack(msg.textLower)) {
     if (cursor > 0) {
       const prevCursor = cursor - 1;
       const prevConfig = emotionConfigurations[prevCursor];
-      const backPayload = { ...payload, emotion_cursor: prevCursor };
-
-      await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', backPayload, link);
+      await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', { ...payload, emotion_cursor: prevCursor }, link);
+      await sendWhatsApp(msg.phone, emotionQuestion(prevConfig, prevCursor, emotionConfigurations.length));
+    } else {
       await sendWhatsApp(
         msg.phone,
-        `↩️ Voltando à pergunta anterior.\n\n${emotionQuestion(prevConfig, prevCursor, emotionConfigurations.length)}`
+        'Você já está na primeira pergunta 💜 Responda com um número ou envie *cancelar* para encerrar.'
       );
-
-      return [{ json: { ok: true } }];
     }
-
-    // cursor = 0: volta ao menu inicial
-    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
-    const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
-
-    await upsertState(
-      msg.phone,
-      'WAITING_INITIAL_DIARY_MENU',
-      {
-        has_today_entry: !!todayData?.entry,
-        today_entry_id: todayData?.entry?.id || null,
-        last_entry_id: lastData?.entry?.id || null
-      },
-      link
-    );
-
-    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
     return [{ json: { ok: true } }];
   }
 
@@ -2359,9 +2832,7 @@ if (state.current_step === 'WAITING_EMOTION_SCORE') {
   if (!score) {
     await sendWhatsApp(
       msg.phone,
-      `Me responda com um nÃºmero entre ${currentConfig.scale_min} e ${currentConfig.scale_max}, por favor ðŸ’œ
-
-${emotionQuestion(currentConfig, cursor, emotionConfigurations.length)}`
+      `Me responda com um número entre ${currentConfig.scale_min} e ${currentConfig.scale_max}, por favor 💜\n\n${emotionQuestion(currentConfig, cursor, emotionConfigurations.length)}`
     );
 
     return [{ json: { ok: true } }];
@@ -2398,32 +2869,17 @@ ${emotionQuestion(currentConfig, cursor, emotionConfigurations.length)}`
 }
 
 if (state.current_step === 'WAITING_SLEEP_HOURS') {
-  if (isGoBack(msg.textLower)) {
-    const emotionConfigurations = Array.isArray(payload.emotion_configurations)
-      ? payload.emotion_configurations
-      : [];
-    const lastCursor = emotionConfigurations.length - 1;
-    const lastConfig = emotionConfigurations[lastCursor] || null;
-    const backPayload = { ...payload, emotion_cursor: lastCursor };
-
-    await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', backPayload, link);
+  if (isBack(msg.textLower)) {
+    const emotionConfigurations = Array.isArray(payload.emotion_configurations) ? payload.emotion_configurations : [];
+    const lastCursor = Math.max(0, emotionConfigurations.length - 1);
+    const lastConfig = emotionConfigurations[lastCursor];
 
     if (lastConfig) {
-      await sendWhatsApp(
-        msg.phone,
-        `↩️ Voltando à pergunta anterior.\n\n${emotionQuestion(lastConfig, lastCursor, emotionConfigurations.length)}`
-      );
+      await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', { ...payload, emotion_cursor: lastCursor }, link);
+      await sendWhatsApp(msg.phone, emotionQuestion(lastConfig, lastCursor, emotionConfigurations.length));
     } else {
-      const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
-      const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
-      await upsertState(msg.phone, 'WAITING_INITIAL_DIARY_MENU', {
-        has_today_entry: !!todayData?.entry,
-        today_entry_id: todayData?.entry?.id || null,
-        last_entry_id: lastData?.entry?.id || null
-      }, link);
-      await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
+      await sendWhatsApp(msg.phone, 'Não foi possível voltar. Responda com as horas de sono ou envie *cancelar*.');
     }
-
     return [{ json: { ok: true } }];
   }
 
@@ -2432,7 +2888,7 @@ if (state.current_step === 'WAITING_SLEEP_HOURS') {
   if (parsed.error) {
     await sendWhatsApp(
       msg.phone,
-      `âŒ Valor invÃ¡lido. ${sleepHoursQuestion()}`
+      `❌ Valor inválido. ${sleepHoursQuestion()}`
     );
 
     return [{ json: { ok: true } }];
@@ -2454,9 +2910,9 @@ if (state.current_step === 'WAITING_SLEEP_HOURS') {
 }
 
 if (state.current_step === 'WAITING_SLEEP_QUALITY') {
-  if (isGoBack(msg.textLower)) {
+  if (isBack(msg.textLower)) {
     await upsertState(msg.phone, 'WAITING_SLEEP_HOURS', payload, link);
-    await sendWhatsApp(msg.phone, `↩️ Voltando à pergunta anterior.\n\n${sleepHoursQuestion()}`);
+    await sendWhatsApp(msg.phone, sleepHoursQuestion());
     return [{ json: { ok: true } }];
   }
 
@@ -2465,7 +2921,7 @@ if (state.current_step === 'WAITING_SLEEP_QUALITY') {
   if (parsed.error) {
     await sendWhatsApp(
       msg.phone,
-      `âŒ Valor invÃ¡lido. ${sleepQualityQuestion()}`
+      `❌ Valor inválido. ${sleepQualityQuestion()}`
     );
 
     return [{ json: { ok: true } }];
@@ -2481,15 +2937,15 @@ if (state.current_step === 'WAITING_SLEEP_QUALITY') {
     link
   );
 
-  await sendWhatsApp(msg.phone, contextQuestion());
+  await sendWhatsApp(msg.phone, contextQuestion({ ...payload, sleep_quality: parsed.value }));
 
   return [{ json: { ok: true } }];
 }
 
 if (state.current_step === 'WAITING_CONTEXT') {
-  if (isGoBack(msg.textLower)) {
+  if (isBack(msg.textLower)) {
     await upsertState(msg.phone, 'WAITING_SLEEP_QUALITY', payload, link);
-    await sendWhatsApp(msg.phone, `↩️ Voltando à pergunta anterior.\n\n${sleepQualityQuestion()}`);
+    await sendWhatsApp(msg.phone, sleepQualityQuestion());
     return [{ json: { ok: true } }];
   }
 
@@ -2505,23 +2961,20 @@ if (state.current_step === 'WAITING_CONTEXT') {
 
   await sendWhatsApp(
     msg.phone,
-    `Quer registrar algo mais sobre como vocÃª se sentiu?
-
-Pode escrever livremente ou responder "pular".
-Envie *voltar* para retornar Ã  pergunta anterior.`
+    `Quer registrar algo mais sobre como você se sentiu?\n\nPode escrever livremente ou responder "pular".`
   );
 
   return [{ json: { ok: true } }];
 }
 
 if (state.current_step === 'WAITING_FREE_TEXT') {
-  if (isGoBack(msg.textLower)) {
+  if (isBack(msg.textLower)) {
     await upsertState(msg.phone, 'WAITING_CONTEXT', payload, link);
-    await sendWhatsApp(msg.phone, `↩️ Voltando à pergunta anterior.\n\n${contextQuestion()}`);
+    await sendWhatsApp(msg.phone, contextQuestion(payload));
     return [{ json: { ok: true } }];
   }
 
-  const freeText = ['pular', 'nÃ£o', 'nao', 'n'].includes(msg.textLower)
+  const freeText = ['pular', 'não', 'nao', 'n'].includes(msg.textLower)
     ? ''
     : msg.text.trim();
 
@@ -2541,17 +2994,13 @@ if (state.current_step === 'WAITING_FREE_TEXT') {
 }
 
 if (state.current_step === 'WAITING_CONFIRMATION') {
-  if (isGoBack(msg.textLower) || msg.textLower === '4') {
-    await upsertState(msg.phone, 'WAITING_FREE_TEXT', payload, link);
-    await sendWhatsApp(
-      msg.phone,
-      `↩️ Voltando à pergunta anterior.\n\nQuer registrar algo mais sobre como você se sentiu?\n\nPode escrever livremente ou responder "pular".
-Envie *voltar* para retornar Ã  pergunta anterior.`
-    );
+  if (msg.textLower === '2' || msg.textLower.includes('ajustar')) {
+    await upsertState(msg.phone, 'WAITING_EDIT_FIELD', payload, link);
+    await sendWhatsApp(msg.phone, editFieldQuestion(payload));
     return [{ json: { ok: true } }];
   }
 
-  if (msg.textLower === '2' || msg.textLower === 'refazer') {
+  if (msg.textLower === '3' || msg.textLower === 'refazer') {
     const startPayload = await buildDiaryStartPayload(
       link.user_id,
       payload.entry_date || todayISO()
@@ -2566,20 +3015,18 @@ Envie *voltar* para retornar Ã  pergunta anterior.`
 
     await sendWhatsApp(
       msg.phone,
-      `Sem problema. Vamos refazer ðŸ’œ
-
-${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
+      `Sem problema. Vamos refazer 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length)}`
     );
 
     return [{ json: { ok: true } }];
   }
 
-  if (msg.textLower === '3' || msg.textLower === 'cancelar') {
+  if (msg.textLower === '4' || msg.textLower === 'cancelar') {
     await clearState(msg.phone);
 
     await sendWhatsApp(
       msg.phone,
-      'Registro cancelado ðŸ’œ Quando quiser, envie "diÃ¡rio" para comeÃ§ar de novo.'
+      'Registro cancelado 💜 Quando quiser, envie "diário" para começar de novo.'
     );
 
     return [{ json: { ok: true } }];
@@ -2588,11 +3035,7 @@ ${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotio
   if (msg.textLower !== '1' && msg.textLower !== 'sim') {
     await sendWhatsApp(
       msg.phone,
-      `Me responda com:
-1ï¸âƒ£ para salvar
-2ï¸âƒ£ para refazer
-3ï¸âƒ£ para cancelar
-4ï¸âƒ£ para voltar`
+      `Me responda com:\n1️⃣ para salvar\n2️⃣ para ajustar uma resposta\n3️⃣ para refazer tudo\n4️⃣ para cancelar`
     );
 
     return [{ json: { ok: true } }];
@@ -2604,11 +3047,97 @@ ${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotio
   await saveMoodEntry(link, payload, buddyMessage, riskLevel, msg.raw);
   await clearState(msg.phone);
 
+  const [streak, total] = await Promise.all([
+    getUserStreak(link.user_id),
+    getUserTotalEntries(link.user_id)
+  ]);
+
   await sendWhatsApp(
     msg.phone,
-    `Registro salvo com carinho ðŸ’œ
+    buildPostSaveMessage(payload, buddyMessage, streak, total)
+  );
 
-${buddyMessage}`
+  if (riskLevel === 'alert') {
+    await sendWhatsApp(
+      msg.phone,
+      `💜 Quando as coisas ficam pesadas assim, não precisamos carregar sozinhos.\n\nSe precisar de apoio agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nVocê pode conversar com alguém de confiança ou com um profissional da sua instituição.`
+    );
+  }
+
+  if (total === 1) {
+    const reminderPref = await getReminderPreference(msg.phone);
+    if (reminderPref === null) {
+      await sendWhatsApp(
+        msg.phone,
+        `💜 Que legal! Seu registro foi guardado com carinho.\n\nDeseja receber lembretes diários para manter seu Diário Emocional em dia?\n\n1️⃣ Sim, ativar lembretes\n2️⃣ Não, obrigado\n\nVocê pode mudar isso depois com *ativar lembretes* ou *desativar lembretes*.`
+      );
+
+      await upsertState(
+        msg.phone,
+        'WAITING_REMINDER_PREFERENCE',
+        { reminder_prompt_shown: true },
+        link
+      );
+
+      return [{ json: { ok: true } }];
+    }
+  }
+
+  return [{ json: { ok: true } }];
+}
+
+if (state.current_step === 'WAITING_REMINDER_PREFERENCE') {
+  const choice = msg.textLower;
+
+  if (choice === '1' || choice.includes('sim') || choice.includes('ativar')) {
+    await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, true);
+    await clearState(msg.phone);
+
+    await sendWhatsApp(
+      msg.phone,
+      '✅ Lembretes ativados! Você receberá notificações para manter seu Diário Emocional em dia 💜'
+    );
+
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice === '2' || choice.includes('não') || choice.includes('nao') || choice.includes('obrigado')) {
+    await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, false);
+    await clearState(msg.phone);
+
+    await sendWhatsApp(
+      msg.phone,
+      'Tudo bem! Você pode ativar lembretes depois com *ativar lembretes* 💜'
+    );
+
+    return [{ json: { ok: true } }];
+  }
+
+  await sendWhatsApp(
+    msg.phone,
+    `Me responda com:\n1️⃣ para ativar lembretes\n2️⃣ para não ativar`
+  );
+
+  return [{ json: { ok: true } }];
+}
+
+if (isReminderEnableCommand(msg.textLower) && !state) {
+  await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, true);
+
+  await sendWhatsApp(
+    msg.phone,
+    '✅ Lembretes ativados com sucesso 💜'
+  );
+
+  return [{ json: { ok: true } }];
+}
+
+if (isReminderDisableCommand(msg.textLower) && !state) {
+  await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, false);
+
+  await sendWhatsApp(
+    msg.phone,
+    '❌ Lembretes desativados. Você pode ativá-los depois com *ativar lembretes* 💜'
   );
 
   return [{ json: { ok: true } }];
@@ -2618,7 +3147,7 @@ await clearState(msg.phone);
 
 await sendWhatsApp(
   msg.phone,
-  'NÃ£o consegui reconhecer a etapa atual. Reiniciei o fluxo. Envie "diÃ¡rio" para comeÃ§ar novamente.'
+  'Não consegui reconhecer a etapa atual. Reiniciei o fluxo. Envie "diário" para começar novamente.'
 );
 
 return [{ json: { ok: true } }];
@@ -2626,7 +3155,7 @@ return [{ json: { ok: true } }];
   const isStateConflict = String(e?.code || e?.message || '').includes('STATE_VERSION_CONFLICT');
   const errorLog = {
     workflow: 'ai-agent-diario-emocional',
-    node: 'Motor DiÃ¡rio Emocional',
+    node: 'Motor Diário Emocional',
     error_code: isStateConflict ? 'STATE_VERSION_CONFLICT' : 'MOTOR_UNHANDLED_ERROR',
     message: e?.message || 'Unknown error',
     timestamp: new Date().toISOString()
@@ -2643,12 +3172,13 @@ return [{ json: { ok: true } }];
       await sendWhatsApp(
         fallbackPhone,
         isStateConflict
-          ? 'Recebi mensagens quase ao mesmo tempo e preciso que vocÃª envie novamente para garantir o registro correto.'
-          : 'Tive uma instabilidade aqui e nÃ£o consegui processar agora. Pode tentar novamente em instantes? ðŸ’œ'
+          ? 'Recebi mensagens quase ao mesmo tempo e preciso que você envie novamente para garantir o registro correto.'
+          : 'Tive uma instabilidade aqui e não consegui processar agora. Pode tentar novamente em instantes? 💜'
       );
     }
   } catch (_) {}
-  return [{ json: { ok: false, error: isStateConflict ? 'STATE_VERSION_CONFLICT' : 'MOTOR_UNHANDLED_ERROR' } }];
+  return [{ json: { ok: false, error: isStateConflict ? 'STATE_VERSION_CONFLICT' : 'MOTOR_UNHANDLED_ERROR', debug_message: e?.message || 'no message' } }];
 }
 
 
+``
