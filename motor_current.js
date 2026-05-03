@@ -154,6 +154,10 @@ function isReminderDisableCommand(t) {
   return ['desativar lembretes', 'desativar aviso', 'desativar notificacao', 'sem lembretes', 'sem aviso'].includes(t);
 }
 
+function isSupportCommand(t) {
+  return ['falar com suporte', 'suporte', 'preciso de ajuda', 'quero ajuda', 'apoio profissional', 'falar com profissional'].includes(t);
+}
+
 function parseScaleNumber(text, scaleMin = 1, scaleMax = 5) {
   const n = Number(String(text || '').trim());
 
@@ -1315,9 +1319,19 @@ function classifyRiskLevel(payload) {
   return 'healthy';
 }
 
-async function getExistingMoodEntry(userId, date) {
+function buildMoodEntriesScopeQuery(userId, tenantId = null) {
+  const base = `user_id=eq.${encodeURIComponent(userId)}`;
+  const tenant = tenantId
+    ? `&tenant_id=eq.${encodeURIComponent(tenantId)}`
+    : '';
+
+  return `${base}${tenant}`;
+}
+
+async function getExistingMoodEntry(userId, date, tenantId = null) {
+  const scope = buildMoodEntriesScopeQuery(userId, tenantId);
   const rows = await supabase(
-    `mood_entries?user_id=eq.${encodeURIComponent(userId)}&date=eq.${encodeURIComponent(date)}&select=*&limit=1`,
+    `mood_entries?${scope}&date=eq.${encodeURIComponent(date)}&select=*&limit=1`,
     { method: 'GET' }
   );
 
@@ -1333,8 +1347,8 @@ async function getExistingMoodAnalysis(moodEntryId) {
   return rows?.[0] || null;
 }
 
-async function getMoodEntryByDateWithAnalysis(userId, dateISO) {
-  const entry = await getExistingMoodEntry(userId, dateISO);
+async function getMoodEntryByDateWithAnalysis(userId, dateISO, tenantId = null) {
+  const entry = await getExistingMoodEntry(userId, dateISO, tenantId);
 
   if (!entry?.id) return null;
 
@@ -1343,13 +1357,10 @@ async function getMoodEntryByDateWithAnalysis(userId, dateISO) {
   return { entry, analysis };
 }
 
-async function getTodayMoodEntryWithAnalysis(userId) {
-  return await getMoodEntryByDateWithAnalysis(userId, todayISO());
-}
-
-async function getLastMoodEntryWithAnalysis(userId) {
+async function getMoodEntryByIdWithAnalysis(userId, moodEntryId, tenantId = null) {
+  const scope = buildMoodEntriesScopeQuery(userId, tenantId);
   const rows = await supabase(
-    `mood_entries?user_id=eq.${encodeURIComponent(userId)}&select=*&order=date.desc,created_at.desc&limit=1`,
+    `mood_entries?${scope}&id=eq.${encodeURIComponent(moodEntryId)}&select=*&limit=1`,
     { method: 'GET' }
   );
 
@@ -1362,22 +1373,51 @@ async function getLastMoodEntryWithAnalysis(userId) {
   return { entry, analysis };
 }
 
-async function getRecentMoodEntries(userId, limit = 10) {
+async function getTodayMoodEntryWithAnalysis(userId, tenantId = null) {
+  return await getMoodEntryByDateWithAnalysis(userId, todayISO(), tenantId);
+}
+
+async function getLastMoodEntryWithAnalysis(userId, tenantId = null) {
+  const scope = buildMoodEntriesScopeQuery(userId, tenantId);
+  const rows = await supabase(
+    `mood_entries?${scope}&select=*&order=date.desc,created_at.desc&limit=1`,
+    { method: 'GET' }
+  );
+
+  const entry = rows?.[0] || null;
+
+  if (!entry?.id) return null;
+
+  const analysis = await getExistingMoodAnalysis(entry.id);
+
+  return { entry, analysis };
+}
+
+async function getRecentMoodEntries(userId, limit = 5, tenantId = null, offset = 0) {
+  const scope = buildMoodEntriesScopeQuery(userId, tenantId);
+  const safeOffset = Number.isFinite(Number(offset)) ? Math.max(0, Number(offset)) : 0;
   try {
     const rows = await supabase(
-      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&select=date,mood_score,energy_level,anxiety_level,day_context&order=date.desc,created_at.desc&limit=${limit}`,
+      `mood_entries?${scope}&select=id,date,mood_score,energy_level,anxiety_level,journal_text&order=date.desc,created_at.desc&limit=${limit}&offset=${safeOffset}`,
       { method: 'GET' }
     );
     return Array.isArray(rows) ? rows : [];
-  } catch (_) {
+  } catch (error) {
+    console.error('getRecentMoodEntries failed', {
+      user_id: userId,
+      tenant_id: tenantId || null,
+      message: error?.message || 'unknown_error'
+    });
     return [];
   }
 }
 
-function formatRecentEntriesList(entries = []) {
+function formatRecentEntriesList(entries = [], options = {}) {
   if (!entries.length) {
     return '📭 Nenhum registro encontrado ainda. Que tal criar o seu primeiro Diário Emocional? 💜';
   }
+
+  const startIndex = Math.max(0, Number(options.offset) || 0);
 
   const lines = entries.map((entry, i) => {
     const date = formatDateBR(entry.date);
@@ -1387,13 +1427,75 @@ function formatRecentEntriesList(entries = []) {
     if (entry.energy_level != null) parts.push(`energia ${entry.energy_level}/5`);
     if (entry.anxiety_level != null) parts.push(`ansiedade ${entry.anxiety_level}/5`);
 
-    const context = entry.day_context ? ` — ${String(entry.day_context).slice(0, 30)}` : '';
+    const parsedContext = parseJournalText(entry.journal_text).day_context;
+    const context = parsedContext ? ` — ${String(parsedContext)}` : '';
     const scores = parts.length ? ` (${parts.join(', ')})` : '';
 
-    return `${i + 1}. 📅 ${date}${scores}${context}`;
+    return `${startIndex + i + 1}. 📅 ${date}${scores}${context}`;
   });
 
   return `📋 *Seus últimos ${entries.length} registros:*\n\n${lines.join('\n')}`;
+}
+
+function formatRecentEntriesActionsMessage(entries = [], options = {}) {
+  if (!entries.length) {
+    return 'Envie *menu* para voltar.';
+  }
+
+  const first = Number(entries[0]?.list_index || 1);
+  const last = Number(entries[entries.length - 1]?.list_index || entries.length);
+  const hasPrevious = options.has_previous === true;
+
+  const lines = [
+    'Você pode:',
+    `• responder com o número de um registro (${first} a ${last}) para ver os detalhes`,
+    '• enviar *mais* para ver registros anteriores',
+    '• enviar *início* para voltar à página mais recente'
+  ];
+
+  if (hasPrevious) {
+    lines.push('• enviar *voltar* para ver registros mais recentes');
+  }
+
+  lines.push('• enviar *menu* para voltar');
+
+  return lines.join('\n');
+}
+
+function buildRecentEntriesInsight(entries = []) {
+  if (!entries.length) return null;
+
+  const scores = entries.map(e => e.mood_score).filter(v => v != null);
+  const energies = entries.map(e => e.energy_level).filter(v => v != null);
+
+  if (!scores.length) return null;
+
+  const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const avgLabel = avgScore >= 4 ? 'bem 😊' : avgScore >= 3 ? 'estável 😐' : 'desafiador 😔';
+
+  const lines = ['📊 *Visão rápida destes registros:*'];
+  lines.push(`• Humor médio: ${avgScore.toFixed(1)} — ${avgLabel}`);
+
+  if (energies.length >= 2) {
+    const first = energies[0];
+    const last = energies[energies.length - 1];
+    const diff = last - first;
+    const trend = diff > 0 ? '↗️ subindo' : diff < 0 ? '↘️ caindo' : '➡️ estável';
+    lines.push(`• Tendência de energia: ${trend}`);
+  }
+
+  if (scores.length >= 2) {
+    const minScore = Math.min(...scores);
+    const minIdx = scores.indexOf(minScore);
+    const minEntry = entries[minIdx];
+    if (minEntry?.date) {
+      const d = new Date(minEntry.date + 'T00:00:00');
+      const dayLabel = d.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'short' });
+      lines.push(`• Dia mais desafiador: ${dayLabel} (humor ${minScore})`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 async function getUserEmotionConfigurations(userId) {
@@ -1571,10 +1673,10 @@ function askDateForOtherDiary() {
   return `Para qual dia você quer registrar o Diário Emocional?\n\nVocê pode responder assim:\n\n• hoje\n• ontem\n• segunda (ou segunda passada)\n• 25/04/2026\n\nDigite a data desejada.`;
 }
 
-async function buildDiaryStartPayload(userId, entryDate) {
+async function buildDiaryStartPayload(userId, entryDate, tenantId = null) {
   const allEmotionConfigurations = await getUserEmotionConfigurations(userId);
-  const lastData = await getLastMoodEntryWithAnalysis(userId);
-  const trends = await getWeeklyEmotionTrends(userId);
+  const lastData = await getLastMoodEntryWithAnalysis(userId, tenantId);
+  const trends = await getWeeklyEmotionTrends(userId, tenantId);
   const emotionConfigurations = pickEmotionConfigurationsForSession(allEmotionConfigurations, lastData, trends, 3);
 
   return {
@@ -1760,7 +1862,7 @@ async function getReminderPreference(phone) {
   }
 }
 
-async function getWeeklyEmotionTrends(userId) {
+async function getWeeklyEmotionTrends(userId, tenantId = null) {
   try {
     const sevenDaysAgo = (() => {
       const d = new Date();
@@ -1768,8 +1870,9 @@ async function getWeeklyEmotionTrends(userId) {
       return d.toISOString().slice(0, 10);
     })();
 
+    const scope = buildMoodEntriesScopeQuery(userId, tenantId);
     const rows = await supabase(
-      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level,emotion_values&order=date.asc`,
+      `mood_entries?${scope}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level,emotion_values&order=date.asc`,
       { method: 'GET' }
     );
 
@@ -1820,10 +1923,11 @@ async function getWeeklyEmotionTrends(userId) {
   }
 }
 
-async function getUserStreak(userId) {
+async function getUserStreak(userId, tenantId = null) {
   try {
+    const scope = buildMoodEntriesScopeQuery(userId, tenantId);
     const rows = await supabase(
-      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&select=date&order=date.desc&limit=120`,
+      `mood_entries?${scope}&select=date&order=date.desc&limit=120`,
       { method: 'GET' }
     );
 
@@ -1850,10 +1954,11 @@ async function getUserStreak(userId) {
   }
 }
 
-async function getUserTotalEntries(userId) {
+async function getUserTotalEntries(userId, tenantId = null) {
   try {
+    const scope = buildMoodEntriesScopeQuery(userId, tenantId);
     const rows = await supabase(
-      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&select=date`,
+      `mood_entries?${scope}&select=date`,
       { method: 'GET' }
     );
 
@@ -1863,7 +1968,7 @@ async function getUserTotalEntries(userId) {
   }
 }
 
-async function buildWeeklySummaryMessage(userId) {
+async function buildWeeklySummaryMessage(userId, tenantId = null) {
   try {
     const sevenDaysAgo = (() => {
       const d = new Date();
@@ -1871,8 +1976,9 @@ async function buildWeeklySummaryMessage(userId) {
       return d.toISOString().slice(0, 10);
     })();
 
+    const scope = buildMoodEntriesScopeQuery(userId, tenantId);
     const rows = await supabase(
-      `mood_entries?user_id=eq.${encodeURIComponent(userId)}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level&order=date.asc`,
+      `mood_entries?${scope}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level&order=date.asc`,
       { method: 'GET' }
     );
 
@@ -1896,7 +2002,7 @@ async function buildWeeklySummaryMessage(userId) {
       lines.push(`Média de humor: ${avg}/5`);
     }
 
-    const streak = await getUserStreak(userId);
+    const streak = await getUserStreak(userId, tenantId);
     if (streak >= 2) lines.push(`🔥 Sequência atual: ${streak} dias seguidos`);
 
     return lines.join('\n');
@@ -1961,7 +2067,7 @@ async function saveMoodEntry(link, payload, buddyMessage, riskLevel, rawPayload 
     updated_at: new Date().toISOString()
   };
 
-  const existingMoodEntry = await getExistingMoodEntry(link.user_id, targetDate);
+  const existingMoodEntry = await getExistingMoodEntry(link.user_id, targetDate, currentTenantId);
 
   let moodEntry;
 
@@ -2316,8 +2422,8 @@ if (!link) {
 
     link = await getLink(msg.phone);
 
-    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
-    const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
     await upsertState(
       msg.phone,
@@ -2393,13 +2499,13 @@ if (isHelp(msg.textLower)) {
 }
 
 if (isResumo(msg.textLower) || isInsightsCommand(msg.textLower)) {
-  const summaryMsg = await buildWeeklySummaryMessage(link.user_id);
+  const summaryMsg = await buildWeeklySummaryMessage(link.user_id, link.tenant_id);
   await sendWhatsApp(msg.phone, summaryMsg);
   return [{ json: { ok: true } }];
 }
 
 if (isUltimoRegistroCommand(msg.textLower)) {
-  const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+  const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
   if (!lastData?.entry) {
     await sendWhatsApp(msg.phone, 'Ainda não encontrei registros anteriores no seu Diário Emocional.');
@@ -2411,10 +2517,10 @@ if (isUltimoRegistroCommand(msg.textLower)) {
 }
 
 if (isAjustarHojeCommand(msg.textLower)) {
-  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
   if (!todayData?.entry) {
-    const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
+    const startPayload = await buildDiaryStartPayload(link.user_id, todayISO(), link.tenant_id);
     await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
     await sendWhatsApp(msg.phone, `Ainda não encontrei um Diário Emocional registrado hoje. Vamos criar agora 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length, { entryDate: startPayload.entry_date })}`);
     return [{ json: { ok: true } }];
@@ -2438,7 +2544,7 @@ if (isAjustarHojeCommand(msg.textLower)) {
 }
 
 if (isRegistrarHojeCommand(msg.textLower)) {
-  const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
+  const startPayload = await buildDiaryStartPayload(link.user_id, todayISO(), link.tenant_id);
   await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
   await sendWhatsApp(msg.phone, `Vamos registrar seu Diário Emocional de hoje 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length, { entryDate: startPayload.entry_date })}`);
   return [{ json: { ok: true } }];
@@ -2454,8 +2560,8 @@ if (!state) {
     return [{ json: { ok: true } }];
   }
 
-  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
-  const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+  const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
   await upsertState(
     msg.phone,
@@ -2489,13 +2595,13 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
       return [{ json: { ok: true } }];
     }
 
-    const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
     if (!lastData?.entry) {
       await sendWhatsApp(msg.phone, 'Ainda não encontrei registros anteriores. Vamos criar seu primeiro Diário Emocional de hoje? 💜');
       return [{ json: { ok: true } }];
     }
 
-    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
     await sendWhatsApp(
       msg.phone,
       `Seu último registro foi este 💜\n\n${formatEntrySummary(lastData.entry, lastData.analysis)}`
@@ -2505,7 +2611,7 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   }
 
   if ((choice === '2' || choice.includes('ajustar') || choice.includes('editar')) && hasTodayEntry) {
-    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
     if (!todayData?.entry) {
       await sendWhatsApp(msg.phone, 'Não encontrei um registro de hoje para ajustar.');
@@ -2541,20 +2647,20 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   }
 
   if ((choice === '1' || choice.includes('hoje')) && hasTodayEntry) {
-    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
     if (todayData?.entry) {
       await sendWhatsApp(
         msg.phone,
         `Seu registro de hoje 💜\n\n${formatEntrySummary(todayData.entry, todayData.analysis)}`
       );
-      await sendWhatsApp(msg.phone, formatInitialDiaryMenu(await getLastMoodEntryWithAnalysis(link.user_id), todayData));
+      await sendWhatsApp(msg.phone, formatInitialDiaryMenu(await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id), todayData));
       return [{ json: { ok: true } }];
     }
   }
 
   if (choice === '1' || choice.includes('hoje') || (hasTodayEntry && choice.includes('registrar'))) {
-    const startPayload = await buildDiaryStartPayload(link.user_id, todayISO());
+    const startPayload = await buildDiaryStartPayload(link.user_id, todayISO(), link.tenant_id);
 
     await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
 
@@ -2583,11 +2689,38 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   }
 
   if (choice === '5' || choice.includes('últimos') || choice.includes('ultimos') || choice.includes('historico') || choice.includes('histórico')) {
-    const recentEntries = await getRecentMoodEntries(link.user_id, 10);
-    await sendWhatsApp(msg.phone, formatRecentEntriesList(recentEntries));
-    const todayDataR = await getTodayMoodEntryWithAnalysis(link.user_id);
-    const lastDataR = await getLastMoodEntryWithAnalysis(link.user_id);
-    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastDataR, todayDataR));
+    const pageSize = 5;
+    const recentOffset = 0;
+    const recentEntriesRaw = await getRecentMoodEntries(link.user_id, pageSize, link.tenant_id, recentOffset);
+
+    if (!recentEntriesRaw.length) {
+      await sendWhatsApp(msg.phone, formatRecentEntriesList([]));
+      const todayDataR = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+      const lastDataR = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+      await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastDataR, todayDataR));
+      return [{ json: { ok: true } }];
+    }
+
+    const recentEntries = recentEntriesRaw.map((entry, index) => ({
+      ...entry,
+      list_index: recentOffset + index + 1
+    }));
+
+    await upsertState(
+      msg.phone,
+      'WAITING_RECENT_ENTRIES_ACTION',
+      {
+        recent_entries: recentEntries,
+        recent_offset: recentOffset,
+        recent_page_size: pageSize
+      },
+      link
+    );
+
+    const insightMsg = buildRecentEntriesInsight(recentEntries);
+    if (insightMsg) await sendWhatsApp(msg.phone, insightMsg);
+    await sendWhatsApp(msg.phone, formatRecentEntriesList(recentEntries, { offset: recentOffset }));
+    await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(recentEntries, { has_previous: false }));
     return [{ json: { ok: true } }];
   }
 
@@ -2596,16 +2729,202 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
       msg.phone,
       '🌐 Acesse seu Diário Emocional completo na web:\n\nhttps://redebemestar.com.br/diario-emocional'
     );
-    const todayDataW = await getTodayMoodEntryWithAnalysis(link.user_id);
-    const lastDataW = await getLastMoodEntryWithAnalysis(link.user_id);
+    const todayDataW = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    const lastDataW = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
     await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastDataW, todayDataW));
     return [{ json: { ok: true } }];
   }
 
-  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id);
-  const lastData = await getLastMoodEntryWithAnalysis(link.user_id);
+  const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+  const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
 
   await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
+  return [{ json: { ok: true } }];
+}
+
+if (state.current_step === 'WAITING_RECENT_ENTRIES_ACTION') {
+  const choice = msg.textLower.trim();
+  const currentEntries = Array.isArray(payload.recent_entries) ? payload.recent_entries : [];
+  const currentOffset = Number(payload.recent_offset || 0);
+  const pageSize = Number(payload.recent_page_size || 5);
+
+  if (!currentEntries.length) {
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+
+    await upsertState(
+      msg.phone,
+      'WAITING_INITIAL_DIARY_MENU',
+      {
+        has_today_entry: !!todayData?.entry,
+        today_entry_id: todayData?.entry?.id || null,
+        last_entry_id: lastData?.entry?.id || null
+      },
+      link
+    );
+
+    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice.includes('menu') || choice.includes('cancelar')) {
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+
+    await upsertState(
+      msg.phone,
+      'WAITING_INITIAL_DIARY_MENU',
+      {
+        has_today_entry: !!todayData?.entry,
+        today_entry_id: todayData?.entry?.id || null,
+        last_entry_id: lastData?.entry?.id || null
+      },
+      link
+    );
+
+    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice.includes('voltar') || choice.includes('anterior')) {
+    if (currentOffset <= 0) {
+      await sendWhatsApp(msg.phone, 'Você já está na página mais recente 💜');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: false }));
+      return [{ json: { ok: true } }];
+    }
+
+    const previousOffset = Math.max(0, currentOffset - pageSize);
+    const previousEntriesRaw = await getRecentMoodEntries(link.user_id, pageSize, link.tenant_id, previousOffset);
+
+    if (!previousEntriesRaw.length) {
+      await sendWhatsApp(msg.phone, 'Não consegui voltar a página agora. Tente novamente em instantes.');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
+      return [{ json: { ok: true } }];
+    }
+
+    const previousEntries = previousEntriesRaw.map((entry, index) => ({
+      ...entry,
+      list_index: previousOffset + index + 1
+    }));
+
+    await upsertState(
+      msg.phone,
+      'WAITING_RECENT_ENTRIES_ACTION',
+      {
+        recent_entries: previousEntries,
+        recent_offset: previousOffset,
+        recent_page_size: pageSize
+      },
+      link
+    );
+
+    await sendWhatsApp(msg.phone, formatRecentEntriesList(previousEntries, { offset: previousOffset }));
+    await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(previousEntries, { has_previous: previousOffset > 0 }));
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice.includes('início') || choice.includes('inicio') || choice.includes('primeira')) {
+    if (currentOffset <= 0) {
+      await sendWhatsApp(msg.phone, 'Você já está na página mais recente 💜');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: false }));
+      return [{ json: { ok: true } }];
+    }
+
+    const firstOffset = 0;
+    const firstEntriesRaw = await getRecentMoodEntries(link.user_id, pageSize, link.tenant_id, firstOffset);
+
+    if (!firstEntriesRaw.length) {
+      await sendWhatsApp(msg.phone, 'Não consegui voltar ao início agora. Tente novamente em instantes.');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
+      return [{ json: { ok: true } }];
+    }
+
+    const firstEntries = firstEntriesRaw.map((entry, index) => ({
+      ...entry,
+      list_index: firstOffset + index + 1
+    }));
+
+    await upsertState(
+      msg.phone,
+      'WAITING_RECENT_ENTRIES_ACTION',
+      {
+        recent_entries: firstEntries,
+        recent_offset: firstOffset,
+        recent_page_size: pageSize
+      },
+      link
+    );
+
+    const firstInsightMsg = buildRecentEntriesInsight(firstEntries);
+    if (firstInsightMsg) await sendWhatsApp(msg.phone, firstInsightMsg);
+    await sendWhatsApp(msg.phone, formatRecentEntriesList(firstEntries, { offset: firstOffset }));
+    await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(firstEntries, { has_previous: false }));
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice === 'mais' || choice.includes('próxim') || choice.includes('proxim') || choice.includes('anteriores')) {
+    const nextOffset = currentOffset + currentEntries.length;
+    const nextEntriesRaw = await getRecentMoodEntries(link.user_id, pageSize, link.tenant_id, nextOffset);
+
+    if (!nextEntriesRaw.length) {
+      await sendWhatsApp(msg.phone, 'Você já está vendo os registros mais antigos disponíveis 💜');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
+      return [{ json: { ok: true } }];
+    }
+
+    const nextEntries = nextEntriesRaw.map((entry, index) => ({
+      ...entry,
+      list_index: nextOffset + index + 1
+    }));
+
+    await upsertState(
+      msg.phone,
+      'WAITING_RECENT_ENTRIES_ACTION',
+      {
+        recent_entries: nextEntries,
+        recent_offset: nextOffset,
+        recent_page_size: pageSize
+      },
+      link
+    );
+
+    await sendWhatsApp(msg.phone, formatRecentEntriesList(nextEntries, { offset: nextOffset }));
+    await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(nextEntries, { has_previous: nextOffset > 0 }));
+    return [{ json: { ok: true } }];
+  }
+
+  const selectedListIndex = Number.parseInt(choice, 10);
+
+  if (Number.isInteger(selectedListIndex)) {
+    const selected = currentEntries.find((entry) => Number(entry.list_index) === selectedListIndex);
+
+    if (!selected?.id) {
+      await sendWhatsApp(msg.phone, 'Não encontrei esse número nesta página. Escolha um número mostrado na lista.');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
+      return [{ json: { ok: true } }];
+    }
+
+    const selectedData = await getMoodEntryByIdWithAnalysis(link.user_id, selected.id, link.tenant_id);
+
+    if (!selectedData?.entry) {
+      await sendWhatsApp(msg.phone, 'Não consegui abrir os detalhes desse registro agora. Tente novamente em instantes.');
+      await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
+      return [{ json: { ok: true } }];
+    }
+
+    await sendWhatsApp(
+      msg.phone,
+      `Detalhes do registro ${selectedListIndex} 💜\n\n${formatEntrySummary(selectedData.entry, selectedData.analysis)}`
+    );
+    await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
+    return [{ json: { ok: true } }];
+  }
+
+  await sendWhatsApp(
+    msg.phone,
+    'Não entendi sua resposta. Você pode enviar o número de um registro, *mais*, *voltar*, *início* ou *menu*.'
+  );
+  await sendWhatsApp(msg.phone, formatRecentEntriesActionsMessage(currentEntries, { has_previous: currentOffset > 0 }));
   return [{ json: { ok: true } }];
 }
 
@@ -2630,7 +2949,7 @@ if (state.current_step === 'WAITING_OTHER_DIARY_DATE') {
     return [{ json: { ok: true } }];
   }
 
-  const selectedData = await getMoodEntryByDateWithAnalysis(link.user_id, selectedDate);
+  const selectedData = await getMoodEntryByDateWithAnalysis(link.user_id, selectedDate, link.tenant_id);
 
   if (selectedData?.entry) {
     const existingPayload = buildPayloadFromExistingEntry(selectedData.entry, selectedData.analysis);
@@ -2659,7 +2978,7 @@ if (state.current_step === 'WAITING_OTHER_DIARY_DATE') {
     return [{ json: { ok: true } }];
   }
 
-  const startPayload = await buildDiaryStartPayload(link.user_id, selectedDate);
+  const startPayload = await buildDiaryStartPayload(link.user_id, selectedDate, link.tenant_id);
 
   await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
 
@@ -2693,7 +3012,8 @@ if (state.current_step === 'WAITING_EXISTING_ENTRY_CHOICE') {
   ) {
     const startPayload = await buildDiaryStartPayload(
       link.user_id,
-      payload.entry_date || todayISO()
+      payload.entry_date || todayISO(),
+      link.tenant_id
     );
 
     await upsertState(
@@ -2887,7 +3207,8 @@ if (state.current_step === 'WAITING_EMOTION_SCORE') {
   if (!currentConfig) {
     const fallbackStartPayload = await buildDiaryStartPayload(
       link.user_id,
-      payload.entry_date || todayISO()
+      payload.entry_date || todayISO(),
+      link.tenant_id
     );
 
     await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', fallbackStartPayload, link);
@@ -3080,7 +3401,8 @@ if (state.current_step === 'WAITING_CONFIRMATION') {
   if (msg.textLower === '3' || msg.textLower === 'refazer') {
     const startPayload = await buildDiaryStartPayload(
       link.user_id,
-      payload.entry_date || todayISO()
+      payload.entry_date || todayISO(),
+      link.tenant_id
     );
 
     await upsertState(
@@ -3125,8 +3447,8 @@ if (state.current_step === 'WAITING_CONFIRMATION') {
   await clearState(msg.phone);
 
   const [streak, total] = await Promise.all([
-    getUserStreak(link.user_id),
-    getUserTotalEntries(link.user_id)
+    getUserStreak(link.user_id, link.tenant_id),
+    getUserTotalEntries(link.user_id, link.tenant_id)
   ]);
 
   await sendWhatsApp(
@@ -3137,7 +3459,7 @@ if (state.current_step === 'WAITING_CONFIRMATION') {
   if (riskLevel === 'alert') {
     await sendWhatsApp(
       msg.phone,
-      `💜 Quando as coisas ficam pesadas assim, não precisamos carregar sozinhos.\n\nSe precisar de apoio agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nVocê pode conversar com alguém de confiança ou com um profissional da sua instituição.`
+      `💜 Quando as coisas ficam pesadas assim, não precisamos carregar sozinhos.\n\nSe precisar de apoio agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nSe quiser falar com um profissional da sua instituição, envie *falar com suporte* e eu te ajudo a conectar 💜`
     );
   }
 
@@ -3217,6 +3539,14 @@ if (isReminderDisableCommand(msg.textLower) && !state) {
     '❌ Lembretes desativados. Você pode ativá-los depois com *ativar lembretes* 💜'
   );
 
+  return [{ json: { ok: true } }];
+}
+
+if (isSupportCommand(msg.textLower)) {
+  await sendWhatsApp(
+    msg.phone,
+    `💜 Que bom que você está buscando apoio.\n\nVou avisar a equipe da sua instituição para que um profissional entre em contato com você em breve.\n\nSe precisar de apoio imediato agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nCuide-se 💜`
+  );
   return [{ json: { ok: true } }];
 }
 
