@@ -352,7 +352,7 @@ const DEFAULT_EMOTION_CATALOG = {
     description: 'Capacidade de concentração',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['�', '😶', '🤔', '🎯', '⚡'],
+    emoji_set: ['😵', '😶', '🤔', '🎯', '⚡'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -502,7 +502,7 @@ function normalizeEmotionConfigurations(rows = []) {
       let emojiSet = configuredEmojiSet;
 
       if (emotionType === 'focus' && scaleMin === 1 && scaleMax === 5) {
-        emojiSet = ['�', '😶', '🤔', '🎯', '⚡'];
+        emojiSet = ['😵', '😶', '🤔', '🎯', '⚡'];
       }
 
       if (!emojiSet.length && Array.isArray(catalog?.emoji_set)) {
@@ -1307,39 +1307,239 @@ async function callGpt(payload, riskLevel) {
   }
 }
 
-async function callGptInsights(rows = []) {
-  if (!rows.length) return null;
+function normalizeInsightMetricKey(metricKey) {
+  const key = String(metricKey || '').trim().toLowerCase();
 
-  const historyLines = rows.map((row) => {
-    const ev = (row.emotion_values && typeof row.emotion_values === 'object') ? row.emotion_values : {};
-    const allKeys = new Set([
-      ...(row.mood_score != null ? ['mood'] : []),
-      ...(row.energy_level != null ? ['energy'] : []),
-      ...(row.anxiety_level != null ? ['anxiety'] : []),
-      ...Object.keys(ev).filter((k) => !['mood', 'energy', 'anxiety'].includes(k))
-    ]);
-    const scores = [...allKeys].map((k) => {
-      const v = ev[k] ?? (k === 'mood' ? row.mood_score : k === 'energy' ? row.energy_level : k === 'anxiety' ? row.anxiety_level : null);
-      return v != null ? `${k}:${v}` : null;
-    }).filter(Boolean).join(', ');
+  if (!key) return '';
+  if (key === 'mood_score' || key === 'mood') return 'mood';
+  if (key === 'energy_level' || key === 'energy') return 'energy';
+  if (key === 'anxiety_level' || key === 'anxiety') return 'anxiety';
 
-    const parsed = (() => {
-      const t = String(row.journal_text || '');
-      const ctxMatch = t.match(/Contexto do dia:\s*(.*?)\.\s*Registro livre:/s);
-      const freeMatch = t.match(/Registro livre:\s*(.*?)\.\s*Canal:/s);
-      return {
-        ctx: ctxMatch?.[1]?.trim() || '',
-        free: freeMatch?.[1]?.trim() || ''
-      };
-    })();
+  return key;
+}
 
-    const extra = [parsed.ctx && `contexto: ${parsed.ctx}`, parsed.free && `texto: ${parsed.free}`].filter(Boolean).join(' | ');
-    return `${row.date}: ${scores}${extra ? ` | ${extra}` : ''}`;
-  }).join('\n');
+function humanizeInsightLabel(metricKey) {
+  return String(metricKey || '')
+    .replace(/_/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
 
-  const system = `Você é o Buddy da Rede Bem-Estar, assistente de acolhimento emocional para estudantes.\nAnalise o histórico emocional e gere uma análise empática, humana e construtiva.\nNão faça diagnóstico. Não substitua profissional de saúde.\nIdentifique padrões, pontos de atenção e sugira no máximo 2 ações simples de autocuidado.\nSeja direto e acolhedor. Máximo 600 caracteres.`;
+function buildInsightMetricMeta(metricKey, emotionConfigMap = new Map()) {
+  const key = normalizeInsightMetricKey(metricKey);
 
-  const user = `Histórico de registros do diário emocional (do mais antigo ao mais recente):\n${historyLines}\n\nGere uma análise de padrões e recomendações breves.`;
+  const baseMeta = {
+    mood: { label: 'Humor', unit: 'scale', scaleMax: 5, order: 1 },
+    energy: { label: 'Energia', unit: 'scale', scaleMax: 5, order: 2 },
+    anxiety: { label: 'Ansiedade', unit: 'scale', scaleMax: 5, order: 3 },
+    sleep_hours: { label: 'Sono', unit: 'hours', scaleMax: null, order: 4 },
+    sleep_quality: { label: 'Qualidade do sono', unit: 'scale', scaleMax: 5, order: 5 }
+  };
+
+  if (baseMeta[key]) return { key, ...baseMeta[key] };
+
+  const config = emotionConfigMap.get(key);
+  if (config) {
+    return {
+      key,
+      label: config.display_name || humanizeInsightLabel(key),
+      unit: key === 'sleep_hours' ? 'hours' : 'scale',
+      scaleMax: Number.isFinite(Number(config.scale_max)) ? Number(config.scale_max) : 5,
+      order: 100 + (Number.isFinite(Number(config.order_position)) ? Number(config.order_position) : 999)
+    };
+  }
+
+  const catalog = getEmotionCatalogDefinition(key);
+  if (catalog) {
+    return {
+      key,
+      label: catalog.display_name || humanizeInsightLabel(key),
+      unit: key === 'sleep_hours' ? 'hours' : 'scale',
+      scaleMax: Number.isFinite(Number(catalog.scale_max)) ? Number(catalog.scale_max) : 5,
+      order: 200
+    };
+  }
+
+  return {
+    key,
+    label: humanizeInsightLabel(key),
+    unit: key === 'sleep_hours' ? 'hours' : 'scale',
+    scaleMax: 5,
+    order: 300
+  };
+}
+
+function formatInsightMetricValue(metric) {
+  const numeric = Number(metric?.value);
+
+  if (!Number.isFinite(numeric)) return 'não informado';
+  if (metric?.unit === 'hours') return `${String(numeric).replace(/\.0$/, '')}h`;
+
+  return `${numeric}/${metric?.scaleMax || 5}`;
+}
+
+function formatInsightAverageValue(metric) {
+  const numeric = Number(metric?.average);
+
+  if (!Number.isFinite(numeric)) return 'não informado';
+
+  const formatted = numeric.toFixed(1).replace(/\.0$/, '');
+  if (metric?.unit === 'hours') return `${formatted}h`;
+
+  return `${formatted}/${metric?.scaleMax || 5}`;
+}
+
+const INSIGHT_LOWER_IS_BETTER = new Set(['anxiety', 'stress']);
+const INSIGHT_SLEEP_HOURS_KEY = 'sleep_hours';
+const INSIGHT_IDEAL_SLEEP_HOURS = 8;
+
+function calcMetricTrend(key, values) {
+  if (!Array.isArray(values) || values.length < 2) return 'stable';
+  const half = Math.floor(values.length / 2);
+  const firstHalf = values.slice(0, half);
+  const secondHalf = values.slice(half);
+  const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const firstAvg = avg(firstHalf);
+  const secondAvg = avg(secondHalf);
+  const diff = secondAvg - firstAvg;
+
+  if (Math.abs(diff) < 0.3) return 'stable';
+
+  if (key === INSIGHT_SLEEP_HOURS_KEY) {
+    const firstDist = Math.abs(firstAvg - INSIGHT_IDEAL_SLEEP_HOURS);
+    const secondDist = Math.abs(secondAvg - INSIGHT_IDEAL_SLEEP_HOURS);
+    return secondDist < firstDist ? 'improving' : 'worsening';
+  }
+
+  if (INSIGHT_LOWER_IS_BETTER.has(key)) return diff < 0 ? 'improving' : 'worsening';
+  return diff > 0 ? 'improving' : 'worsening';
+}
+
+function trendEmoji(trend) {
+  if (trend === 'improving') return '↗️';
+  if (trend === 'worsening') return '↘️';
+  return '➡️';
+}
+
+function buildInsightHistory(rows = [], emotionConfigurations = []) {
+  const emotionConfigMap = new Map(
+    (Array.isArray(emotionConfigurations) ? emotionConfigurations : [])
+      .map((config) => [String(config?.emotion_type || '').trim().toLowerCase(), config])
+      .filter(([key]) => key)
+  );
+
+  const historyRows = rows.map((row) => {
+    const metricsMap = new Map();
+    const addMetric = (metricKey, value) => {
+      const key = normalizeInsightMetricKey(metricKey);
+      const numeric = Number(value);
+
+      if (!key || !Number.isFinite(numeric)) return;
+      if (metricsMap.has(key)) return;
+
+      metricsMap.set(key, numeric);
+    };
+
+    addMetric('mood', row.mood_score);
+    addMetric('energy', row.energy_level);
+    addMetric('anxiety', row.anxiety_level);
+    addMetric('sleep_hours', row.sleep_hours);
+    addMetric('sleep_quality', row.sleep_quality);
+
+    const emotionValues = row?.emotion_values && typeof row.emotion_values === 'object'
+      ? row.emotion_values
+      : {};
+
+    for (const [metricKey, value] of Object.entries(emotionValues)) {
+      addMetric(metricKey, value);
+    }
+
+    const parsedText = parseJournalText(row.journal_text);
+    const metrics = [...metricsMap.entries()]
+      .map(([key, value]) => ({
+        ...buildInsightMetricMeta(key, emotionConfigMap),
+        value
+      }))
+      .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label, 'pt-BR'));
+
+    return {
+      date: row.date,
+      metrics,
+      day_context: parsedText.day_context,
+      free_text: parsedText.free_text
+    };
+  });
+
+  const metricBuckets = new Map();
+  let emotionsCount = 0;
+
+  for (const row of historyRows) {
+    emotionsCount += row.metrics.length;
+
+    for (const metric of row.metrics) {
+      if (!metricBuckets.has(metric.key)) {
+        metricBuckets.set(metric.key, {
+          key: metric.key,
+          label: metric.label,
+          unit: metric.unit,
+          scaleMax: metric.scaleMax,
+          order: metric.order,
+          values: []
+        });
+      }
+
+      metricBuckets.get(metric.key).values.push(metric.value);
+    }
+  }
+
+  const averageMetrics = [...metricBuckets.values()]
+    .map((metric) => ({
+      ...metric,
+      average: metric.values.reduce((sum, value) => sum + value, 0) / metric.values.length,
+      trend: calcMetricTrend(metric.key, metric.values)
+    }))
+    .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label, 'pt-BR'));
+
+  return {
+    rows: historyRows,
+    averageMetrics,
+    emotionsCount
+  };
+}
+
+async function callGptInsights(historyRows = []) {
+  if (!historyRows.length) return null;
+
+  const truncate = (value, max = 120) => {
+    const text = String(value || '').trim();
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  };
+
+  const PRIORITY_KEYS = new Set(['mood', 'energy', 'anxiety', 'sleep_hours', 'sleep_quality', 'stress']);
+
+  const historyLines = historyRows.map((row) => {
+    const priorityMet = row.metrics.filter((m) => PRIORITY_KEYS.has(m.key));
+    const otherMet = row.metrics.filter((m) => !PRIORITY_KEYS.has(m.key));
+    const metricsSlice = [...priorityMet, ...otherMet].slice(0, 12);
+    const metricsText = metricsSlice.map((m) => `${m.label}:${formatInsightMetricValue(m)}`).join(' | ');
+    const contextText = truncate(row.day_context, 100);
+    const freeText = truncate(row.free_text, 150);
+    const extras = [
+      contextText ? `Ctx: ${contextText}` : null,
+      freeText ? `Texto: ${freeText}` : null
+    ].filter(Boolean).join(' | ');
+
+    return [`${formatDateBR(row.date)}: ${metricsText || 'não informado'}`, extras]
+      .filter(Boolean)
+      .join('\n');
+  }).join('\n\n');
+
+  const system = `Buddy da Rede Bem-Estar. Analise o histórico emocional e responda em PT-BR com: 1) padrões, 2) ponto de atenção, 3) até 2 ações de autocuidado. Seja humano e acolhedor. Sem diagnóstico. Máx 700 chars.`;
+
+  const user = `Histórico:\n\n${historyLines}`;
 
   try {
     const data = await httpJson('https://api.openai.com/v1/responses', {
@@ -2026,9 +2226,10 @@ async function getUserTotalEntries(userId, tenantId = null) {
 
 async function buildWeeklySummaryMessage(userId, tenantId = null) {
   try {
+    const emotionConfigurations = await getUserEmotionConfigurations(userId);
     const scope = buildMoodEntriesScopeQuery(userId, tenantId);
     const rows = await supabase(
-      `mood_entries?${scope}&select=date,mood_score,energy_level,anxiety_level,emotion_values,journal_text&order=date.desc&limit=10`,
+      `mood_entries?${scope}&select=date,mood_score,energy_level,anxiety_level,sleep_hours,sleep_quality,emotion_values,journal_text&order=date.desc&limit=10`,
       { method: 'GET' }
     );
 
@@ -2037,43 +2238,44 @@ async function buildWeeklySummaryMessage(userId, tenantId = null) {
     }
 
     const rowsAsc = [...rows].reverse();
-
-    // Collect all emotion keys present across all records
-    const allEmotionKeys = (() => {
-      const keys = new Set(['mood', 'energy', 'anxiety']);
-      for (const row of rows) {
-        if (row.emotion_values && typeof row.emotion_values === 'object') {
-          for (const k of Object.keys(row.emotion_values)) keys.add(k);
-        }
-      }
-      return [...keys];
-    })();
-
+    const insightHistory = buildInsightHistory(rowsAsc, emotionConfigurations);
     const lines = [`📊 *Seus últimos ${rows.length} registros* 💜`, ''];
 
-    for (const row of rowsAsc) {
-      const ev = (row.emotion_values && typeof row.emotion_values === 'object') ? row.emotion_values : {};
-      const parts = allEmotionKeys.map((k) => {
-        const v = ev[k] ?? (k === 'mood' ? row.mood_score : k === 'energy' ? row.energy_level : k === 'anxiety' ? row.anxiety_level : null);
-        if (v == null) return null;
-        const label = k === 'mood' ? 'Humor' : k === 'energy' ? 'Energia' : k === 'anxiety' ? 'Ansiedade' : k.charAt(0).toUpperCase() + k.slice(1);
-        return `${label} ${v}/5`;
-      }).filter(Boolean).join(' | ');
-      lines.push(`📅 ${formatDateBR(row.date)}: ${parts || 'sem scores registrados'}`);
+    const MAIN_KEYS = new Set(['mood', 'energy', 'anxiety']);
+    const SLEEP_KEYS = new Set(['sleep_hours', 'sleep_quality']);
+
+    for (const row of insightHistory.rows) {
+      const mainMet = row.metrics.filter((m) => MAIN_KEYS.has(m.key));
+      const sleepMet = row.metrics.filter((m) => SLEEP_KEYS.has(m.key));
+      const otherMet = row.metrics.filter((m) => !MAIN_KEYS.has(m.key) && !SLEEP_KEYS.has(m.key));
+      const allParts = [...mainMet, ...sleepMet, ...otherMet]
+        .map((m) => `${m.label} ${formatInsightMetricValue(m)}`)
+        .join(' | ');
+      lines.push(`• *${formatDateBR(row.date)}*`);
+      lines.push(allParts || 'sem indicadores registrados');
+      lines.push('');
     }
 
-    // Averages for all emotion keys
-    lines.push('');
-    lines.push('📈 *Médias do período:*');
-    for (const k of allEmotionKeys) {
-      const vals = rows.map((r) => {
-        const ev = (r.emotion_values && typeof r.emotion_values === 'object') ? r.emotion_values : {};
-        return ev[k] ?? (k === 'mood' ? r.mood_score : k === 'energy' ? r.energy_level : k === 'anxiety' ? r.anxiety_level : null);
-      }).filter((v) => v != null);
-      if (!vals.length) continue;
-      const avg = (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1);
-      const label = k === 'mood' ? 'Humor' : k === 'energy' ? 'Energia' : k === 'anxiety' ? 'Ansiedade' : k.charAt(0).toUpperCase() + k.slice(1);
-      lines.push(`• ${label}: ${avg}/5`);
+    lines.push('📈 *Médias do período*');
+
+    const mainMetrics = insightHistory.averageMetrics.filter((m) => MAIN_KEYS.has(m.key));
+    const sleepMetrics = insightHistory.averageMetrics.filter((m) => SLEEP_KEYS.has(m.key));
+    const otherMetrics = insightHistory.averageMetrics.filter((m) => !MAIN_KEYS.has(m.key) && !SLEEP_KEYS.has(m.key));
+
+    if (mainMetrics.length) {
+      lines.push('');
+      lines.push('*Principais*');
+      for (const m of mainMetrics) lines.push(`• ${m.label}: ${formatInsightAverageValue(m)} ${trendEmoji(m.trend)}`);
+    }
+    if (sleepMetrics.length) {
+      lines.push('');
+      lines.push('*Sono*');
+      for (const m of sleepMetrics) lines.push(`• ${m.label}: ${formatInsightAverageValue(m)} ${trendEmoji(m.trend)}`);
+    }
+    if (otherMetrics.length) {
+      lines.push('');
+      lines.push('*Demais emoções*');
+      for (const m of otherMetrics) lines.push(`• ${m.label}: ${formatInsightAverageValue(m)} ${trendEmoji(m.trend)}`);
     }
 
     const streak = await getUserStreak(userId, tenantId);
@@ -2085,28 +2287,44 @@ async function buildWeeklySummaryMessage(userId, tenantId = null) {
     lines.push('');
     lines.push('🌐 Acesse seu histórico completo em:\nhttps://redebemestar.com.br/diario-emocional');
 
-    // LLM analysis
-    const llmAnalysis = await callGptInsights(rowsAsc);
+    const llmAnalysis = await callGptInsights(insightHistory.rows);
 
     if (llmAnalysis) {
       lines.push('');
       lines.push('🤖 *Análise do Buddy:*');
       lines.push(llmAnalysis);
 
-      // Save to mood_insight_analyses
+      const requestedAt = new Date().toISOString();
+
       try {
         await supabase('mood_insight_analyses', {
           method: 'POST',
           body: JSON.stringify({
             user_id: userId,
             tenant_id: tenantId || null,
-            requested_at: new Date().toISOString(),
+            requested_at: requestedAt,
+            requested_date: requestedAt.slice(0, 10),
+            requested_time: requestedAt.slice(11, 19),
             entries_count: rows.length,
+            emotions_count: insightHistory.emotionsCount,
             llm_analysis: llmAnalysis
           })
         });
       } catch (_) {
-        // Non-critical — don't fail the response if save fails
+        try {
+          await supabase('mood_insight_analyses', {
+            method: 'POST',
+            body: JSON.stringify({
+              user_id: userId,
+              tenant_id: tenantId || null,
+              requested_at: requestedAt,
+              entries_count: rows.length,
+              llm_analysis: llmAnalysis
+            })
+          });
+        } catch (_) {
+          // Non-critical — don't fail the response if save fails
+        }
       }
     }
 
