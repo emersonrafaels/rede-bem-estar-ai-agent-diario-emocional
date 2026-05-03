@@ -352,7 +352,7 @@ const DEFAULT_EMOTION_CATALOG = {
     description: 'Capacidade de concentração',
     scale_min: 1,
     scale_max: 5,
-    emoji_set: ['😶', '🤔', '🎯', '🎯', '🎯'],
+    emoji_set: ['�', '😶', '🤔', '🎯', '⚡'],
     color_scheme: {
       low: 'hsl(0, 70%, 50%)',
       mid: 'hsl(45, 100%, 50%)',
@@ -502,7 +502,7 @@ function normalizeEmotionConfigurations(rows = []) {
       let emojiSet = configuredEmojiSet;
 
       if (emotionType === 'focus' && scaleMin === 1 && scaleMax === 5) {
-        emojiSet = ['😶', '🤔', '🎯', '🎯', '🎯'];
+        emojiSet = ['�', '😶', '🤔', '🎯', '⚡'];
       }
 
       if (!emojiSet.length && Array.isArray(catalog?.emoji_set)) {
@@ -1655,10 +1655,10 @@ function formatInitialDiaryMenu(lastData, todayData) {
     : 'Ainda não encontrei registros anteriores do seu Diário Emocional.';
 
   if (!hasToday) {
-    return `Olá 💜\n\n${lastText}\n\nAinda não encontrei um Diário Emocional registrado hoje.\n\nO que você deseja fazer?\n\n1️⃣ Registrar Diário Emocional de hoje\n2️⃣ Registrar Diário Emocional de outro dia\n3️⃣ Ver meu último registro\n4️⃣ Cancelar\n5️⃣ Ver últimos registros\n6️⃣ Abrir Diário na web`;
+    return `Olá 💜\n\n${lastText}\n\nAinda não encontrei um Diário Emocional registrado hoje.\n\nO que você deseja fazer?\n\n1️⃣ Registrar Diário Emocional de hoje\n2️⃣ Registrar Diário Emocional de outro dia\n3️⃣ Ver meu último registro\n4️⃣ Cancelar\n5️⃣ Ver últimos registros\n6️⃣ Abrir Diário na web\n7️⃣ Atalhos`;
   }
 
-  return `Olá 💜\n\n${lastText}\n\nVocê já registrou seu Diário Emocional hoje.\n\nO que deseja fazer?\n\n1️⃣ Ver registro de hoje\n2️⃣ Ajustar registro de hoje\n3️⃣ Registrar outro dia\n4️⃣ Manter como está\n5️⃣ Ver últimos registros\n6️⃣ Abrir Diário na web`;
+  return `Olá 💜\n\n${lastText}\n\nVocê já registrou seu Diário Emocional hoje.\n\nO que deseja fazer?\n\n1️⃣ Ver registro de hoje\n2️⃣ Ajustar registro de hoje\n3️⃣ Registrar outro dia\n4️⃣ Manter como está\n5️⃣ Ver últimos registros\n6️⃣ Abrir Diário na web\n7️⃣ Atalhos`;
 }
 
 function formatExistingEntryMessage(entry, analysis = null, label = 'dessa data') {
@@ -1674,10 +1674,7 @@ function askDateForOtherDiary() {
 }
 
 async function buildDiaryStartPayload(userId, entryDate, tenantId = null) {
-  const allEmotionConfigurations = await getUserEmotionConfigurations(userId);
-  const lastData = await getLastMoodEntryWithAnalysis(userId, tenantId);
-  const trends = await getWeeklyEmotionTrends(userId, tenantId);
-  const emotionConfigurations = pickEmotionConfigurationsForSession(allEmotionConfigurations, lastData, trends, 3);
+  const emotionConfigurations = await getUserEmotionConfigurations(userId);
 
   return {
     entry_date: entryDate,
@@ -2444,6 +2441,11 @@ if (!link) {
 
     await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
 
+    await sendWhatsApp(
+      msg.phone,
+      '💡 *Atalhos que você pode usar a qualquer momento:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *ajuda* — ver todos os comandos'
+    );
+
     return [{ json: { ok: true } }];
   }
 
@@ -2732,6 +2734,17 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
     const todayDataW = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
     const lastDataW = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
     await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastDataW, todayDataW));
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice === '7' || choice.includes('atalho')) {
+    await sendWhatsApp(
+      msg.phone,
+      '💡 *Atalhos disponíveis:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *ajuda* — ver todos os comandos'
+    );
+    const todayDataA = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    const lastDataA = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastDataA, todayDataA));
     return [{ json: { ok: true } }];
   }
 
