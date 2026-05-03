@@ -158,6 +158,159 @@ function isSupportCommand(t) {
   return ['falar com suporte', 'suporte', 'preciso de ajuda', 'quero ajuda', 'apoio profissional', 'falar com profissional'].includes(t);
 }
 
+const REMINDER_DEFAULT_TIMEZONE = 'America/Sao_Paulo';
+const REMINDER_DEFAULT_HOUR = '20:00';
+const REMINDER_DEFAULT_WEEKDAYS = [1, 2, 3, 4, 5, 6, 0];
+
+function reminderTimezoneQuestion() {
+  return [
+    'Perfeito 💜 Vamos configurar seus lembretes.',
+    '',
+    'Qual fuso horário você usa?',
+    '',
+    '1️⃣ Brasília (America/Sao_Paulo)',
+    '2️⃣ Manaus (America/Manaus)',
+    '3️⃣ Rio Branco (America/Rio_Branco)',
+    '',
+    'Se preferir, digite outro fuso no formato *America/Sao_Paulo*.'
+  ].join('\n');
+}
+
+function reminderHourQuestion(timezone = REMINDER_DEFAULT_TIMEZONE) {
+  return [
+    `Ótimo. Agora me diga o horário do lembrete para o fuso *${timezone}*.` ,
+    '',
+    'Você pode responder como:',
+    '• 20',
+    '• 20:00',
+    '• 08:30',
+    '',
+    `Se quiser manter o padrão, responda *${REMINDER_DEFAULT_HOUR}*.`
+  ].join('\n');
+}
+
+function reminderWeekdaysQuestion() {
+  return [
+    'Quais dias você quer receber lembretes?',
+    '',
+    'Exemplos:',
+    '• todos',
+    '• seg a sex',
+    '• segunda, quarta, sexta',
+    '• 1,3,5 (segunda, quarta, sexta)'
+  ].join('\n');
+}
+
+function normalizeReminderTimezone(text) {
+  const value = String(text || '').trim();
+  const lower = value.toLowerCase();
+
+  if (value === '1' || lower.includes('brasilia') || lower.includes('sao paulo') || lower.includes('são paulo')) {
+    return 'America/Sao_Paulo';
+  }
+
+  if (value === '2' || lower.includes('manaus')) {
+    return 'America/Manaus';
+  }
+
+  if (value === '3' || lower.includes('rio branco')) {
+    return 'America/Rio_Branco';
+  }
+
+  if (/^[A-Za-z_]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?$/.test(value)) {
+    return value;
+  }
+
+  return null;
+}
+
+function normalizeReminderHour(text) {
+  const value = String(text || '').trim();
+  const match = value.match(/^(\d{1,2})(?::(\d{2}))?$/);
+
+  if (!match) return null;
+
+  const hour = Number(match[1]);
+  const minute = match[2] === undefined ? 0 : Number(match[2]);
+
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function parseReminderWeekdays(text) {
+  const value = String(text || '').trim().toLowerCase();
+  if (!value) return null;
+
+  if (value === 'todos' || value === 'todos os dias' || value === 'diario' || value === 'diário') {
+    return [...REMINDER_DEFAULT_WEEKDAYS];
+  }
+
+  if (value.includes('seg') && value.includes('sex')) {
+    return [1, 2, 3, 4, 5];
+  }
+
+  const normalized = value
+    .replace(/\./g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const weekdayMap = {
+    'domingo': 0, 'dom': 0, '0': 0, '7': 0,
+    'segunda': 1, 'segunda-feira': 1, 'seg': 1, '1': 1,
+    'terca': 2, 'terça': 2, 'terca-feira': 2, 'terça-feira': 2, 'ter': 2, '2': 2,
+    'quarta': 3, 'quarta-feira': 3, 'qua': 3, '3': 3,
+    'quinta': 4, 'quinta-feira': 4, 'qui': 4, '4': 4,
+    'sexta': 5, 'sexta-feira': 5, 'sex': 5, '5': 5,
+    'sabado': 6, 'sábado': 6, 'sab': 6, 'sáb': 6, '6': 6
+  };
+
+  const parts = normalized.split(/\s*,\s*|\s+e\s+|\s*\/\s*/).map((part) => part.trim()).filter(Boolean);
+  const days = [];
+
+  for (const part of parts) {
+    const day = weekdayMap[part];
+    if (day === undefined) continue;
+    if (!days.includes(day)) days.push(day);
+  }
+
+  if (!days.length) return null;
+  return days;
+}
+
+function formatReminderWeekdays(days = []) {
+  const labels = {
+    0: 'domingo',
+    1: 'segunda',
+    2: 'terça',
+    3: 'quarta',
+    4: 'quinta',
+    5: 'sexta',
+    6: 'sábado'
+  };
+
+  const normalized = [...new Set((Array.isArray(days) ? days : [])
+    .map((day) => Number(day))
+    .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))];
+
+  if (normalized.length === 7) return 'todos os dias';
+  return normalized.map((day) => labels[day]).filter(Boolean).join(', ') || 'todos os dias';
+}
+
+function buildReminderSettingsPayload(previousPayload = {}) {
+  const previousDays = Array.isArray(previousPayload.reminder_weekdays)
+    ? previousPayload.reminder_weekdays
+    : REMINDER_DEFAULT_WEEKDAYS;
+
+  return {
+    reminder_timezone: previousPayload.reminder_timezone || REMINDER_DEFAULT_TIMEZONE,
+    reminder_hour_local: previousPayload.reminder_hour_local || REMINDER_DEFAULT_HOUR,
+    reminder_weekdays: previousDays,
+    reminder_weekdays_label: formatReminderWeekdays(previousDays)
+  };
+}
+
 function parseScaleNumber(text, scaleMin = 1, scaleMax = 5) {
   const n = Number(String(text || '').trim());
 
@@ -2102,7 +2255,36 @@ async function saveReminderPreference(phone, userId, tenantId, enabled = true) {
         updated_at: new Date().toISOString()
       })
     });
-  } catch (e) {}
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function saveReminderPreferenceWithSettings(phone, userId, tenantId, enabled = true, settings = {}) {
+  const safeSettings = settings && typeof settings === 'object' ? settings : {};
+
+  try {
+    await supabase('whatsapp_reminder_preferences?on_conflict=phone', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates,return=representation',
+      body: JSON.stringify({
+        phone,
+        user_id: userId,
+        tenant_id: tenantId,
+        is_enabled: enabled,
+        timezone: safeSettings.reminder_timezone || REMINDER_DEFAULT_TIMEZONE,
+        reminder_hour_local: safeSettings.reminder_hour_local || REMINDER_DEFAULT_HOUR,
+        reminder_weekdays: Array.isArray(safeSettings.reminder_weekdays) ? safeSettings.reminder_weekdays : REMINDER_DEFAULT_WEEKDAYS,
+        reminder_weekdays_label: safeSettings.reminder_weekdays_label || formatReminderWeekdays(safeSettings.reminder_weekdays || REMINDER_DEFAULT_WEEKDAYS),
+        updated_at: new Date().toISOString()
+      })
+    });
+    return { success: true, advancedSaved: true };
+  } catch (_) {
+    const basicSaved = await saveReminderPreference(phone, userId, tenantId, enabled);
+    return { success: basicSaved, advancedSaved: false };
+  }
 }
 
 async function getReminderPreference(phone) {
@@ -2911,6 +3093,37 @@ if (!state) {
 }
 
 const payload = state.payload || {};
+
+if (isReminderDisableCommand(msg.textLower)) {
+  const disabled = await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, false);
+  await clearState(msg.phone);
+
+  await sendWhatsApp(
+    msg.phone,
+    disabled
+      ? '❌ Lembretes desativados. Você pode ativá-los depois com *ativar lembretes* 💜'
+      : 'Tive uma instabilidade e não consegui desativar agora. Pode tentar novamente em instantes? 💜'
+  );
+
+  return [{ json: { ok: true } }];
+}
+
+if (isReminderEnableCommand(msg.textLower)) {
+  const nextReminderPayload = buildReminderSettingsPayload(payload);
+
+  await upsertState(
+    msg.phone,
+    'WAITING_REMINDER_TIMEZONE',
+    {
+      ...nextReminderPayload,
+      reminder_started_at: new Date().toISOString()
+    },
+    link
+  );
+
+  await sendWhatsApp(msg.phone, reminderTimezoneQuestion());
+  return [{ json: { ok: true } }];
+}
 
 if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   const choice = msg.textLower;
@@ -3825,13 +4038,20 @@ if (state.current_step === 'WAITING_REMINDER_PREFERENCE') {
   const choice = msg.textLower;
 
   if (choice === '1' || choice.includes('sim') || choice.includes('ativar')) {
-    await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, true);
-    await clearState(msg.phone);
+    const nextReminderPayload = buildReminderSettingsPayload(payload);
 
-    await sendWhatsApp(
+    await upsertState(
       msg.phone,
-      '✅ Lembretes ativados! Você receberá notificações para manter seu Diário Emocional em dia 💜'
+      'WAITING_REMINDER_TIMEZONE',
+      {
+        ...nextReminderPayload,
+        reminder_started_at: new Date().toISOString(),
+        reminder_prompt_shown: true
+      },
+      link
     );
+
+    await sendWhatsApp(msg.phone, reminderTimezoneQuestion());
 
     return [{ json: { ok: true } }];
   }
@@ -3856,23 +4076,101 @@ if (state.current_step === 'WAITING_REMINDER_PREFERENCE') {
   return [{ json: { ok: true } }];
 }
 
-if (isReminderEnableCommand(msg.textLower) && !state) {
-  await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, true);
+if (state.current_step === 'WAITING_REMINDER_TIMEZONE') {
+  const parsedTimezone = normalizeReminderTimezone(msg.text);
 
-  await sendWhatsApp(
-    msg.phone,
-    '✅ Lembretes ativados com sucesso 💜'
-  );
+  if (!parsedTimezone) {
+    await sendWhatsApp(
+      msg.phone,
+      'Não entendi o fuso horário. Responda com 1, 2, 3 ou com um fuso no formato *America/Sao_Paulo*.'
+    );
+    await sendWhatsApp(msg.phone, reminderTimezoneQuestion());
+    return [{ json: { ok: true } }];
+  }
 
+  const nextPayload = buildReminderSettingsPayload({
+    ...payload,
+    reminder_timezone: parsedTimezone
+  });
+
+  await upsertState(msg.phone, 'WAITING_REMINDER_HOUR', nextPayload, link);
+  await sendWhatsApp(msg.phone, reminderHourQuestion(parsedTimezone));
   return [{ json: { ok: true } }];
 }
 
-if (isReminderDisableCommand(msg.textLower) && !state) {
-  await saveReminderPreference(msg.phone, link.user_id, link.tenant_id, false);
+if (state.current_step === 'WAITING_REMINDER_HOUR') {
+  const parsedHour = normalizeReminderHour(msg.text);
+
+  if (!parsedHour) {
+    await sendWhatsApp(
+      msg.phone,
+      'Horário inválido. Use o formato *HH* ou *HH:MM* (ex.: 20 ou 20:00).'
+    );
+    await sendWhatsApp(msg.phone, reminderHourQuestion(payload.reminder_timezone || REMINDER_DEFAULT_TIMEZONE));
+    return [{ json: { ok: true } }];
+  }
+
+  const nextPayload = buildReminderSettingsPayload({
+    ...payload,
+    reminder_hour_local: parsedHour
+  });
+
+  await upsertState(msg.phone, 'WAITING_REMINDER_WEEKDAYS', nextPayload, link);
+  await sendWhatsApp(msg.phone, reminderWeekdaysQuestion());
+  return [{ json: { ok: true } }];
+}
+
+if (state.current_step === 'WAITING_REMINDER_WEEKDAYS') {
+  const parsedWeekdays = parseReminderWeekdays(msg.text);
+
+  if (!parsedWeekdays) {
+    await sendWhatsApp(
+      msg.phone,
+      'Não consegui entender os dias. Responda, por exemplo: *todos*, *seg a sex* ou *segunda, quarta, sexta*.'
+    );
+    await sendWhatsApp(msg.phone, reminderWeekdaysQuestion());
+    return [{ json: { ok: true } }];
+  }
+
+  const reminderSettings = buildReminderSettingsPayload({
+    ...payload,
+    reminder_weekdays: parsedWeekdays
+  });
+
+  const saveResult = await saveReminderPreferenceWithSettings(
+    msg.phone,
+    link.user_id,
+    link.tenant_id,
+    true,
+    reminderSettings
+  );
+
+  await clearState(msg.phone);
+
+  if (!saveResult.success) {
+    await sendWhatsApp(
+      msg.phone,
+      'Tive uma instabilidade e não consegui ativar agora. Pode tentar novamente em instantes? 💜'
+    );
+    return [{ json: { ok: true } }];
+  }
+
+  const details = [
+    '✅ Lembretes ativados com sucesso 💜',
+    '',
+    `• Fuso: ${reminderSettings.reminder_timezone}`,
+    `• Horário: ${reminderSettings.reminder_hour_local}`,
+    `• Dias: ${reminderSettings.reminder_weekdays_label}`
+  ];
+
+  if (!saveResult.advancedSaved) {
+    details.push('');
+    details.push('Obs.: horário e dias serão aplicados assim que o workflow agendado estiver com suporte completo a essas preferências.');
+  }
 
   await sendWhatsApp(
     msg.phone,
-    '❌ Lembretes desativados. Você pode ativá-los depois com *ativar lembretes* 💜'
+    details.join('\n')
   );
 
   return [{ json: { ok: true } }];
