@@ -1307,6 +1307,65 @@ async function callGpt(payload, riskLevel) {
   }
 }
 
+async function callGptInsights(rows = []) {
+  if (!rows.length) return null;
+
+  const historyLines = rows.map((row) => {
+    const ev = (row.emotion_values && typeof row.emotion_values === 'object') ? row.emotion_values : {};
+    const allKeys = new Set([
+      ...(row.mood_score != null ? ['mood'] : []),
+      ...(row.energy_level != null ? ['energy'] : []),
+      ...(row.anxiety_level != null ? ['anxiety'] : []),
+      ...Object.keys(ev).filter((k) => !['mood', 'energy', 'anxiety'].includes(k))
+    ]);
+    const scores = [...allKeys].map((k) => {
+      const v = ev[k] ?? (k === 'mood' ? row.mood_score : k === 'energy' ? row.energy_level : k === 'anxiety' ? row.anxiety_level : null);
+      return v != null ? `${k}:${v}` : null;
+    }).filter(Boolean).join(', ');
+
+    const parsed = (() => {
+      const t = String(row.journal_text || '');
+      const ctxMatch = t.match(/Contexto do dia:\s*(.*?)\.\s*Registro livre:/s);
+      const freeMatch = t.match(/Registro livre:\s*(.*?)\.\s*Canal:/s);
+      return {
+        ctx: ctxMatch?.[1]?.trim() || '',
+        free: freeMatch?.[1]?.trim() || ''
+      };
+    })();
+
+    const extra = [parsed.ctx && `contexto: ${parsed.ctx}`, parsed.free && `texto: ${parsed.free}`].filter(Boolean).join(' | ');
+    return `${row.date}: ${scores}${extra ? ` | ${extra}` : ''}`;
+  }).join('\n');
+
+  const system = `Você é o Buddy da Rede Bem-Estar, assistente de acolhimento emocional para estudantes.\nAnalise o histórico emocional e gere uma análise empática, humana e construtiva.\nNão faça diagnóstico. Não substitua profissional de saúde.\nIdentifique padrões, pontos de atenção e sugira no máximo 2 ações simples de autocuidado.\nSeja direto e acolhedor. Máximo 600 caracteres.`;
+
+  const user = `Histórico de registros do diário emocional (do mais antigo ao mais recente):\n${historyLines}\n\nGere uma análise de padrões e recomendações breves.`;
+
+  try {
+    const data = await httpJson('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${CFG.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: CFG.OPENAI_MODEL,
+        input: [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ]
+      })
+    });
+
+    return (
+      data.output_text ||
+      data.output?.[0]?.content?.[0]?.text ||
+      null
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 function classifyRiskLevel(payload) {
   const safePayload = applyLegacyEmotionFields(payload || {});
   const mood = Number(safePayload.mood_score || 0);
@@ -1967,40 +2026,89 @@ async function getUserTotalEntries(userId, tenantId = null) {
 
 async function buildWeeklySummaryMessage(userId, tenantId = null) {
   try {
-    const sevenDaysAgo = (() => {
-      const d = new Date();
-      d.setDate(d.getDate() - 6);
-      return d.toISOString().slice(0, 10);
-    })();
-
     const scope = buildMoodEntriesScopeQuery(userId, tenantId);
     const rows = await supabase(
-      `mood_entries?${scope}&date=gte.${encodeURIComponent(sevenDaysAgo)}&select=date,mood_score,energy_level,anxiety_level&order=date.asc`,
+      `mood_entries?${scope}&select=date,mood_score,energy_level,anxiety_level,emotion_values,journal_text&order=date.desc&limit=10`,
       { method: 'GET' }
     );
 
     if (!Array.isArray(rows) || !rows.length) {
-      return 'Ainda não encontrei registros nos últimos 7 dias 💜 Que tal fazer seu primeiro registro hoje? Envie *diário*!';
+      return 'Ainda não encontrei registros 💜 Que tal fazer seu primeiro registro hoje? Envie *diário*!';
     }
 
-    const lines = ['📊 *Seu resumo dos últimos 7 dias* 💜', ''];
+    const rowsAsc = [...rows].reverse();
 
-    for (const row of rows) {
-      const mood = row.mood_score != null ? `Humor ${row.mood_score}/5` : null;
-      const energy = row.energy_level != null ? `Energia ${row.energy_level}/5` : null;
-      const parts = [mood, energy].filter(Boolean).join(', ');
+    // Collect all emotion keys present across all records
+    const allEmotionKeys = (() => {
+      const keys = new Set(['mood', 'energy', 'anxiety']);
+      for (const row of rows) {
+        if (row.emotion_values && typeof row.emotion_values === 'object') {
+          for (const k of Object.keys(row.emotion_values)) keys.add(k);
+        }
+      }
+      return [...keys];
+    })();
+
+    const lines = [`📊 *Seus últimos ${rows.length} registros* 💜`, ''];
+
+    for (const row of rowsAsc) {
+      const ev = (row.emotion_values && typeof row.emotion_values === 'object') ? row.emotion_values : {};
+      const parts = allEmotionKeys.map((k) => {
+        const v = ev[k] ?? (k === 'mood' ? row.mood_score : k === 'energy' ? row.energy_level : k === 'anxiety' ? row.anxiety_level : null);
+        if (v == null) return null;
+        const label = k === 'mood' ? 'Humor' : k === 'energy' ? 'Energia' : k === 'anxiety' ? 'Ansiedade' : k.charAt(0).toUpperCase() + k.slice(1);
+        return `${label} ${v}/5`;
+      }).filter(Boolean).join(' | ');
       lines.push(`📅 ${formatDateBR(row.date)}: ${parts || 'sem scores registrados'}`);
     }
 
-    const moodScores = rows.map((r) => r.mood_score).filter((v) => v != null);
-    if (moodScores.length >= 2) {
-      const avg = (moodScores.reduce((a, b) => a + b, 0) / moodScores.length).toFixed(1);
-      lines.push('');
-      lines.push(`Média de humor: ${avg}/5`);
+    // Averages for all emotion keys
+    lines.push('');
+    lines.push('📈 *Médias do período:*');
+    for (const k of allEmotionKeys) {
+      const vals = rows.map((r) => {
+        const ev = (r.emotion_values && typeof r.emotion_values === 'object') ? r.emotion_values : {};
+        return ev[k] ?? (k === 'mood' ? r.mood_score : k === 'energy' ? r.energy_level : k === 'anxiety' ? r.anxiety_level : null);
+      }).filter((v) => v != null);
+      if (!vals.length) continue;
+      const avg = (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1);
+      const label = k === 'mood' ? 'Humor' : k === 'energy' ? 'Energia' : k === 'anxiety' ? 'Ansiedade' : k.charAt(0).toUpperCase() + k.slice(1);
+      lines.push(`• ${label}: ${avg}/5`);
     }
 
     const streak = await getUserStreak(userId, tenantId);
-    if (streak >= 2) lines.push(`🔥 Sequência atual: ${streak} dias seguidos`);
+    if (streak >= 2) {
+      lines.push('');
+      lines.push(`🔥 Sequência atual: ${streak} dias seguidos`);
+    }
+
+    lines.push('');
+    lines.push('🌐 Acesse seu histórico completo em:\nhttps://redebemestar.com.br/diario-emocional');
+
+    // LLM analysis
+    const llmAnalysis = await callGptInsights(rowsAsc);
+
+    if (llmAnalysis) {
+      lines.push('');
+      lines.push('🤖 *Análise do Buddy:*');
+      lines.push(llmAnalysis);
+
+      // Save to mood_insight_analyses
+      try {
+        await supabase('mood_insight_analyses', {
+          method: 'POST',
+          body: JSON.stringify({
+            user_id: userId,
+            tenant_id: tenantId || null,
+            requested_at: new Date().toISOString(),
+            entries_count: rows.length,
+            llm_analysis: llmAnalysis
+          })
+        });
+      } catch (_) {
+        // Non-critical — don't fail the response if save fails
+      }
+    }
 
     return lines.join('\n');
   } catch (_) {
@@ -2742,9 +2850,6 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
       msg.phone,
       '💡 *Atalhos disponíveis:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *ajuda* — ver todos os comandos'
     );
-    const todayDataA = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
-    const lastDataA = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
-    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastDataA, todayDataA));
     return [{ json: { ok: true } }];
   }
 
