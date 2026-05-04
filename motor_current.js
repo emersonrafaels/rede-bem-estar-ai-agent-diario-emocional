@@ -184,12 +184,16 @@ function isSupportCommand(t) {
 
   if (!cmd) return false;
 
-  return /\b(falar com suporte|suporte|preciso de ajuda|quero ajuda|apoio profissional|falar com profissional)\b/.test(cmd);
+  return /\b(falar com suporte|suporte|preciso de ajuda|quero ajuda|apoio profissional|falar com profissional|falar com especialista|especialista|quero especialista)\b/.test(cmd);
 }
 
 const REMINDER_DEFAULT_TIMEZONE = 'America/Sao_Paulo';
 const REMINDER_DEFAULT_HOUR = '20:00';
 const REMINDER_DEFAULT_WEEKDAYS = [1, 2, 3, 4, 5, 6, 0];
+const SPECIALIST_CONTACTS = [
+  { phone: '5511975872447', name: 'Especialista - Jayme Neto' },
+  { phone: '5511973473605', name: 'Especialista - Leo Facchini' }
+];
 
 function reminderTimezoneQuestion() {
   return [
@@ -1260,6 +1264,32 @@ async function getProfileByEmail(email) {
   };
 }
 
+async function getProfileByUserId(userId, tenantId = null) {
+  if (!userId) return null;
+
+  const tenantFilter = tenantId
+    ? `&tenant_id=eq.${encodeURIComponent(tenantId)}`
+    : '';
+
+  const rows = await supabase(
+    `profiles?user_id=eq.${encodeURIComponent(userId)}${tenantFilter}&select=*&limit=1`,
+    { method: 'GET' }
+  );
+
+  const profile = rows?.[0] || null;
+
+  if (!profile) return null;
+
+  return {
+    id: profile.id,
+    user_id: profile.user_id,
+    tenant_id: profile.tenant_id || null,
+    nome: profile.nome || profile.name || null,
+    email: profile.email || null,
+    telefone: profile.telefone || profile.phone || null
+  };
+}
+
 async function getState(phone) {
   const rows = await supabase(
     `whatsapp_conversation_state?phone=eq.${encodeURIComponent(phone)}&expires_at=gt.now()&select=*&limit=1`,
@@ -1851,6 +1881,227 @@ async function getRecentMoodEntries(userId, limit = 5, tenantId = null, offset =
     });
     return [];
   }
+}
+
+async function getRecentMoodEntriesWithAnalysis(userId, tenantId = null, limit = 5) {
+  const entries = await getRecentMoodEntries(userId, limit, tenantId, 0);
+  if (!entries.length) return [];
+
+  const detailed = [];
+  for (const entry of entries) {
+    const analysis = await getExistingMoodAnalysis(entry.id);
+    detailed.push({ entry, analysis: analysis || null });
+  }
+
+  return detailed;
+}
+
+function formatPhoneBR(value) {
+  const digits = normalizePhone(value);
+  if (digits.length === 13) {
+    return `+${digits.slice(0, 2)} ${digits.slice(2, 4)} ${digits.slice(4, 9)}-${digits.slice(9)}`;
+  }
+  if (digits.length === 12) {
+    return `+${digits.slice(0, 2)} ${digits.slice(2, 4)} ${digits.slice(4, 8)}-${digits.slice(8)}`;
+  }
+  return digits ? `+${digits}` : 'não informado';
+}
+
+function buildSpecialistContactLink(phone) {
+  const digits = normalizePhone(phone);
+  return digits ? `https://wa.me/${digits}` : null;
+}
+
+function truncateText(value, max = 180) {
+  const text = String(value || '').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function buildSpecialistRecentEntriesSummary(recentEntriesWithAnalysis = []) {
+  if (!Array.isArray(recentEntriesWithAnalysis) || !recentEntriesWithAnalysis.length) {
+    return 'Nenhum diário emocional encontrado nos últimos dias.';
+  }
+
+  const lines = recentEntriesWithAnalysis.map(({ entry, analysis }, idx) => {
+    if (!entry) return null;
+
+    const compact = formatEntryCompact(entry, analysis) || 'sem métricas principais';
+    const parsed = parseJournalText(entry.journal_text);
+    const context = truncateText(parsed.day_context || parsed.free_text || '', 120);
+    const contextSuffix = context ? ` | Contexto: ${context}` : '';
+
+    return `${idx + 1}. ${formatDateBR(entry.date)} | ${compact}${contextSuffix}`;
+  }).filter(Boolean);
+
+  return lines.join('\n');
+}
+
+async function callGptSpecialistContext({ profile, userPhone, recentEntriesWithAnalysis }) {
+  const historySummary = buildSpecialistRecentEntriesSummary(recentEntriesWithAnalysis);
+  const safeName = profile?.nome || 'não informado';
+  const safeEmail = profile?.email || 'não informado';
+  const safePhone = formatPhoneBR(profile?.telefone || userPhone);
+
+  const fallback = [
+    'Contexto inicial para acolhimento:',
+    '- O usuário pediu contato com especialista pela conversa do Diário Emocional.',
+    '- Recomenda-se abordagem acolhedora e escuta ativa na primeira mensagem.',
+    '- Verificar disponibilidade emocional atual e oferecer próximos passos de suporte humano.',
+    '- Se houver sofrimento intenso, orientar rede de apoio imediata e canais de urgência.'
+  ].join('\n');
+
+  if (!CFG.OPENAI_API_KEY) {
+    return fallback;
+  }
+
+  const system = 'Você apoia especialistas da Rede Bem Estar com um resumo breve para primeiro contato. Responda em português, sem diagnóstico, sem prescrição, com foco em acolhimento. Máx 900 caracteres. Estruture em: 1) quadro geral, 2) sinais de atenção, 3) sugestão de primeira abordagem.';
+  const user = [
+    'Pedido de contato com especialista recebido no WhatsApp.',
+    `Nome: ${safeName}`,
+    `E-mail: ${safeEmail}`,
+    `Telefone: ${safePhone}`,
+    '',
+    'Últimos diários (resumo):',
+    historySummary
+  ].join('\n');
+
+  try {
+    const data = await httpJson('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${CFG.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: CFG.OPENAI_MODEL,
+        input: [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ]
+      })
+    });
+
+    const text = String(
+      data?.output_text ||
+      data?.output?.[0]?.content?.[0]?.text ||
+      ''
+    ).trim();
+
+    return text || fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function saveSpecialistSupportRequest({
+  userPhone,
+  link,
+  profile,
+  recentEntriesSummary,
+  specialistAiContext,
+  sourceMessage
+}) {
+  const requestBody = {
+    user_id: link?.user_id || null,
+    tenant_id: link?.tenant_id || null,
+    phone: normalizePhone(userPhone),
+    contact_name: profile?.nome || null,
+    contact_email: profile?.email || null,
+    contact_phone: normalizePhone(profile?.telefone || userPhone),
+    source: 'whatsapp',
+    status: 'requested',
+    requested_at: new Date().toISOString(),
+    latest_diaries_summary: recentEntriesSummary || null,
+    specialist_context: specialistAiContext || null,
+    metadata: {
+      message_text: String(sourceMessage || '').slice(0, 280),
+      specialist_targets: SPECIALIST_CONTACTS.map((item) => item.phone)
+    }
+  };
+
+  try {
+    const rows = await supabase('whatsapp_specialist_requests', {
+      method: 'POST',
+      prefer: 'return=representation',
+      body: JSON.stringify(requestBody)
+    });
+
+    return {
+      saved: true,
+      requestId: rows?.[0]?.id || null
+    };
+  } catch (error) {
+    const message = String(error?.message || '');
+    const missingTable = /does not exist|42P01|relation/i.test(message);
+
+    return {
+      saved: false,
+      requestId: null,
+      missingTable,
+      errorMessage: message
+    };
+  }
+}
+
+async function notifySpecialistsSupportRequest({
+  userPhone,
+  profile,
+  recentEntriesSummary,
+  specialistAiContext,
+  requestId
+}) {
+  const normalizedUserPhone = normalizePhone(profile?.telefone || userPhone);
+  const clickableLink = buildSpecialistContactLink(normalizedUserPhone);
+  const userName = profile?.nome || 'Nome não informado';
+  const userEmail = profile?.email || 'Não informado';
+  const formattedUserPhone = formatPhoneBR(normalizedUserPhone || userPhone);
+
+  const messageBlocks = [
+    [
+      '🚨 *Rede Bem Estar*',
+      '',
+      'Recebemos um novo pedido de contato com *especialista* pelo Diário Emocional.',
+      requestId ? `ID da solicitação: ${requestId}` : null
+    ].filter(Boolean).join('\n'),
+    [
+      '👤 *Dados do contato*',
+      `Nome: ${userName}`,
+      `Telefone: ${formattedUserPhone}`,
+      `E-mail: ${userEmail}`,
+      clickableLink ? `Link rápido: ${clickableLink}` : null
+    ].filter(Boolean).join('\n'),
+    [
+      '📘 *Últimos Diários Emocionais*',
+      recentEntriesSummary || 'Sem registros recentes disponíveis.'
+    ].join('\n\n'),
+    [
+      '🧠 *Contexto sugerido por IA para o primeiro contato*',
+      String(specialistAiContext || '').trim() || 'Contexto não disponível no momento.'
+    ].join('\n\n')
+  ];
+
+  let sentCount = 0;
+  const failures = [];
+
+  for (const specialist of SPECIALIST_CONTACTS) {
+    try {
+      for (const block of messageBlocks) {
+        await sendWhatsApp(specialist.phone, block);
+      }
+      sentCount += 1;
+    } catch (error) {
+      failures.push({
+        specialist_phone: specialist.phone,
+        specialist_name: specialist.name,
+        error: String(error?.message || 'notify_failed').slice(0, 250)
+      });
+    }
+  }
+
+  return {
+    sentCount,
+    failures
+  };
 }
 
 function formatRecentEntriesList(entries = [], options = {}) {
@@ -3204,10 +3455,52 @@ if (isReminderEnableCommand(msg.textLower)) {
 if (isSupportCommand(msg.textLower)) {
   await clearState(msg.phone);
 
-  await sendWhatsApp(
-    msg.phone,
-    `💜 Que bom que você está buscando apoio.\n\nVou avisar a equipe da sua instituição para que um profissional entre em contato com você em breve.\n\nSe precisar de apoio imediato agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nCuide-se 💜`
-  );
+  const profile = await getProfileByUserId(link.user_id, link.tenant_id);
+  const recentEntriesWithAnalysis = await getRecentMoodEntriesWithAnalysis(link.user_id, link.tenant_id, 5);
+  const recentEntriesSummary = buildSpecialistRecentEntriesSummary(recentEntriesWithAnalysis);
+  const specialistAiContext = await callGptSpecialistContext({
+    profile,
+    userPhone: msg.phone,
+    recentEntriesWithAnalysis
+  });
+
+  const persistedRequest = await saveSpecialistSupportRequest({
+    userPhone: msg.phone,
+    link,
+    profile,
+    recentEntriesSummary,
+    specialistAiContext,
+    sourceMessage: msg.text
+  });
+
+  const notifyResult = await notifySpecialistsSupportRequest({
+    userPhone: msg.phone,
+    profile,
+    recentEntriesSummary,
+    specialistAiContext,
+    requestId: persistedRequest.requestId
+  });
+
+  const confirmLines = [
+    '💜 Que bom que você está buscando apoio.',
+    '',
+    'Encaminhei seu pedido para especialistas da Rede Bem Estar e eles devem entrar em contato em breve.',
+    notifyResult.sentCount > 0
+      ? `Equipe notificada: ${notifyResult.sentCount} especialista(s).`
+      : 'Tive uma instabilidade ao notificar a equipe, mas seu pedido já foi registrado para acompanhamento.',
+    persistedRequest.missingTable
+      ? 'Obs.: o registro técnico da solicitação não foi salvo porque a tabela de suporte ainda não existe no banco.'
+      : null,
+    '',
+    'Se você precisar de apoio imediato agora:',
+    '📞 CVV: 188 (24h, gratuito)',
+    '💬 cvv.org.br',
+    '',
+    'Cuide-se 💜'
+  ].filter(Boolean);
+
+  await sendWhatsApp(msg.phone, confirmLines.join('\n'));
+
   return [{ json: { ok: true } }];
 }
 
