@@ -12,38 +12,55 @@
           ]
         }
       },
-      "id": "7c2b95ef-6c4a-4f5c-b1f7-420c36aa1b90",
+      "id": "f8f8a0e2-edea-4e36-a5dc-7b7b3165d7a3",
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [
-        240,
-        280
+        -224,
+        -48
       ]
     },
     {
       "parameters": {},
-      "id": "f2093a7e-1c79-4f9f-bf26-2d82da2d99ee",
+      "id": "c0542b1e-2009-42ae-85af-e1cdaad31620",
       "name": "Manual Trigger",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        240,
-        520
+        -224,
+        192
       ]
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json || {};\nconst http = this.helpers.httpRequest.bind(this.helpers);\n\nconst CFG = {\n  SUPABASE_URL: process.env.SUPABASE_URL || 'https://mbuljmpamdocnxppueww.supabase.co',\n  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || '',\n  EVOLUTION_BASE_URL: process.env.EVOLUTION_BASE_URL || 'https://whatsappapi.alopsi.com.br/',\n  EVOLUTION_INSTANCE: process.env.EVOLUTION_INSTANCE || 'Celular_Emerson',\n  EVOLUTION_API_KEY: process.env.EVOLUTION_API_KEY || '',\n  REMINDER_DEFAULT_TIMEZONE: process.env.REMINDER_DEFAULT_TIMEZONE || 'America/Sao_Paulo',\n  REMINDER_DEFAULT_HOUR: process.env.REMINDER_DEFAULT_HOUR || '20:00',\n  REMINDER_WINDOW_MINUTES: Number(process.env.REMINDER_WINDOW_MINUTES || 14),\n  REMINDER_QUERY_LIMIT: Number(process.env.REMINDER_QUERY_LIMIT || 1000)\n};\n\nconst DEFAULT_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];\nconst WEEKDAY_MAP = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };\n\nfunction normalizePhone(value) {\n  return String(value || '').replace(/[^0-9]/g, '');\n}\n\nfunction circularMinuteDiff(a, b) {\n  const diff = Math.abs(Number(a) - Number(b));\n  return Math.min(diff, 1440 - diff);\n}\n\nfunction parseHourMinute(value, fallback) {\n  const raw = String(value || fallback).trim();\n  const match = raw.match(/^(\\d{1,2})(?::(\\d{2}))?$/);\n  if (!match) return { hour: 20, minute: 0, label: fallback };\n\n  const hour = Number(match[1]);\n  const minute = match[2] === undefined ? 0 : Number(match[2]);\n\n  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return { hour: 20, minute: 0, label: fallback };\n  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return { hour: 20, minute: 0, label: fallback };\n\n  const label = String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');\n  return { hour, minute, label };\n}\n\nfunction parseWeekdays(rawValue) {\n  if (Array.isArray(rawValue)) {\n    const values = [...new Set(rawValue.map((v) => Number(v)).filter((v) => Number.isInteger(v) && v >= 0 && v <= 6))];\n    return values.length ? values : [...DEFAULT_WEEKDAYS];\n  }\n\n  if (typeof rawValue === 'string') {\n    const trimmed = rawValue.trim();\n    if (!trimmed) return [...DEFAULT_WEEKDAYS];\n\n    try {\n      const parsed = JSON.parse(trimmed);\n      if (Array.isArray(parsed)) return parseWeekdays(parsed);\n    } catch (_) {}\n\n    const lower = trimmed.toLowerCase();\n    if (lower.includes('todos')) return [...DEFAULT_WEEKDAYS];\n    if (lower.includes('seg') && lower.includes('sex')) return [1, 2, 3, 4, 5];\n\n    const map = {\n      domingo: 0, dom: 0,\n      segunda: 1, 'segunda-feira': 1, seg: 1,\n      terca: 2, 'terca-feira': 2, terça: 2, 'terça-feira': 2, ter: 2,\n      quarta: 3, 'quarta-feira': 3, qua: 3,\n      quinta: 4, 'quinta-feira': 4, qui: 4,\n      sexta: 5, 'sexta-feira': 5, sex: 5,\n      sabado: 6, sábado: 6, sab: 6, sáb: 6\n    };\n\n    const parts = lower.split(/\\s*,\\s*|\\s+e\\s+|\\s*\\/\\s*/).map((p) => p.trim()).filter(Boolean);\n    const values = [];\n\n    for (const part of parts) {\n      if (/^[0-7]$/.test(part)) {\n        const n = part === '7' ? 0 : Number(part);\n        if (!values.includes(n)) values.push(n);\n        continue;\n      }\n\n      const mapped = map[part];\n      if (mapped === undefined) continue;\n      if (!values.includes(mapped)) values.push(mapped);\n    }\n\n    return values.length ? values : [...DEFAULT_WEEKDAYS];\n  }\n\n  return [...DEFAULT_WEEKDAYS];\n}\n\nfunction getLocalNowParts(timezone) {\n  const now = new Date();\n  const formatter = new Intl.DateTimeFormat('en-US', {\n    timeZone: timezone,\n    weekday: 'short',\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit',\n    hour: '2-digit',\n    minute: '2-digit',\n    hour12: false\n  });\n\n  const parts = formatter.formatToParts(now);\n  const index = new Map(parts.map((part) => [part.type, part.value]));\n  const weekdayLabel = index.get('weekday') || 'Sun';\n\n  return {\n    weekday: WEEKDAY_MAP[weekdayLabel] ?? 0,\n    hour: Number(index.get('hour') || 0),\n    minute: Number(index.get('minute') || 0),\n    localDate: (index.get('year') || '1970') + '-' + (index.get('month') || '01') + '-' + (index.get('day') || '01')\n  };\n}\n\nfunction getLocalDateForTimestamp(isoDate, timezone) {\n  if (!isoDate) return null;\n\n  const dt = new Date(isoDate);\n  if (Number.isNaN(dt.getTime())) return null;\n\n  const formatter = new Intl.DateTimeFormat('en-CA', {\n    timeZone: timezone,\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit'\n  });\n\n  const parts = formatter.formatToParts(dt);\n  const index = new Map(parts.map((part) => [part.type, part.value]));\n  const year = index.get('year');\n  const month = index.get('month');\n  const day = index.get('day');\n\n  if (!year || !month || !day) return null;\n  return year + '-' + month + '-' + day;\n}\n\nasync function httpJson(url, options) {\n  const requestOptions = {\n    method: options?.method || 'GET',\n    url,\n    headers: {\n      'Content-Type': 'application/json',\n      ...(options?.headers || {})\n    },\n    json: true\n  };\n\n  if (options && options.body !== undefined) {\n    requestOptions.body = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;\n  }\n\n  return await http(requestOptions);\n}\n\nasync function supabase(path, options) {\n  const baseUrl = String(CFG.SUPABASE_URL || '').replace(/\\/+$/, '');\n  const url = baseUrl + '/rest/v1/' + path;\n\n  return await httpJson(url, {\n    ...(options || {}),\n    headers: {\n      apikey: CFG.SUPABASE_SERVICE_ROLE_KEY,\n      Authorization: 'Bearer ' + CFG.SUPABASE_SERVICE_ROLE_KEY,\n      Prefer: options?.prefer || 'return=representation',\n      ...(options?.headers || {})\n    }\n  });\n}\n\nasync function sendWhatsApp(phone, text) {\n  const baseUrl = String(CFG.EVOLUTION_BASE_URL || '').replace(/\\/+$/, '');\n  const url = baseUrl + '/message/sendText/' + CFG.EVOLUTION_INSTANCE;\n\n  return await httpJson(url, {\n    method: 'POST',\n    headers: { apikey: CFG.EVOLUTION_API_KEY },\n    body: { number: phone, text }\n  });\n}\n\nasync function logDispatch(row) {\n  try {\n    await supabase('whatsapp_reminder_dispatch_logs', { method: 'POST', body: row });\n  } catch (_) {}\n}\n\nasync function updateLastReminded(phone, isoTimestamp) {\n  await supabase('whatsapp_reminder_preferences?phone=eq.' + encodeURIComponent(phone), {\n    method: 'PATCH',\n    body: {\n      last_reminded_at: isoTimestamp,\n      updated_at: isoTimestamp\n    }\n  });\n}\n\nfunction buildReminderMessage(localHourLabel) {\n  return [\n    '💜 Oi! Passando para lembrar do seu Diário Emocional.',\n    '',\n    'Leva menos de 2 minutos e pode te ajudar a perceber padrões com mais clareza.',\n    '',\n    'Quando quiser, envie *diário* para registrar.',\n    '',\n    '⏰ Lembrete configurado para: ' + localHourLabel\n  ].join('\\n');\n}\n\nif (!CFG.SUPABASE_URL || !CFG.SUPABASE_SERVICE_ROLE_KEY) {\n  throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios para o workflow agendado.');\n}\n\nif (!CFG.EVOLUTION_BASE_URL || !CFG.EVOLUTION_API_KEY || !CFG.EVOLUTION_INSTANCE) {\n  throw new Error('Configuração Evolution incompleta para envio de lembretes.');\n}\n\nconst summary = {\n  scanned: 0,\n  due: 0,\n  sent: 0,\n  skipped_weekday: 0,\n  skipped_window: 0,\n  skipped_duplicate: 0,\n  skipped_invalid: 0,\n  failed: 0\n};\n\nconst selectPath = 'whatsapp_reminder_preferences?is_enabled=eq.true&select=phone,user_id,tenant_id,timezone,reminder_hour_local,reminder_weekdays,last_reminded_at,updated_at&limit=' + Math.max(1, Number(CFG.REMINDER_QUERY_LIMIT || 1000));\nconst rows = await supabase(selectPath, { method: 'GET' });\nconst preferences = Array.isArray(rows) ? rows : [];\nsummary.scanned = preferences.length;\n\nfor (const pref of preferences) {\n  const phone = normalizePhone(pref.phone);\n  if (!phone) {\n    summary.skipped_invalid += 1;\n    continue;\n  }\n\n  const timezone = String(pref.timezone || CFG.REMINDER_DEFAULT_TIMEZONE || 'America/Sao_Paulo').trim();\n\n  let localParts;\n  try {\n    localParts = getLocalNowParts(timezone);\n  } catch (_) {\n    summary.skipped_invalid += 1;\n    await logDispatch({\n      phone,\n      user_id: pref.user_id || null,\n      tenant_id: pref.tenant_id || null,\n      status: 'skipped_invalid_timezone',\n      reason: 'invalid_timezone',\n      metadata: { timezone },\n      created_at: new Date().toISOString()\n    });\n    continue;\n  }\n\n  const target = parseHourMinute(pref.reminder_hour_local, CFG.REMINDER_DEFAULT_HOUR || '20:00');\n  const weekdays = parseWeekdays(pref.reminder_weekdays);\n\n  if (!weekdays.includes(localParts.weekday)) {\n    summary.skipped_weekday += 1;\n    continue;\n  }\n\n  const nowMinutes = localParts.hour * 60 + localParts.minute;\n  const targetMinutes = target.hour * 60 + target.minute;\n  const allowedWindow = Math.max(0, Number(CFG.REMINDER_WINDOW_MINUTES || 14));\n\n  if (circularMinuteDiff(nowMinutes, targetMinutes) > allowedWindow) {\n    summary.skipped_window += 1;\n    continue;\n  }\n\n  const lastLocalDate = getLocalDateForTimestamp(pref.last_reminded_at, timezone);\n  if (lastLocalDate && lastLocalDate === localParts.localDate) {\n    summary.skipped_duplicate += 1;\n    continue;\n  }\n\n  summary.due += 1;\n\n  const nowIso = new Date().toISOString();\n  try {\n    await sendWhatsApp(phone, buildReminderMessage(target.label));\n    await updateLastReminded(phone, nowIso);\n\n    await logDispatch({\n      phone,\n      user_id: pref.user_id || null,\n      tenant_id: pref.tenant_id || null,\n      status: 'sent',\n      timezone,\n      local_date: localParts.localDate,\n      local_hour_minute: String(localParts.hour).padStart(2, '0') + ':' + String(localParts.minute).padStart(2, '0'),\n      target_hour_minute: target.label,\n      metadata: { weekday: localParts.weekday, reminder_weekdays: weekdays },\n      created_at: nowIso\n    });\n\n    summary.sent += 1;\n  } catch (error) {\n    summary.failed += 1;\n\n    await logDispatch({\n      phone,\n      user_id: pref.user_id || null,\n      tenant_id: pref.tenant_id || null,\n      status: 'failed',\n      reason: String(error?.message || 'send_failed').slice(0, 240),\n      timezone,\n      metadata: { weekday: localParts.weekday, reminder_weekdays: weekdays },\n      created_at: nowIso\n    });\n  }\n}\n\nreturn [{\n  json: {\n    ok: true,\n    executed_at: new Date().toISOString(),\n    summary,\n    trigger: input\n  }\n}];"
+        "jsCode": "const input = $input.first().json || {};\nconst http = this.helpers.httpRequest.bind(this.helpers);\n\nconst CFG = {\n  SUPABASE_URL: $input.first().json.constants.SUPABASE_URL || 'https://mbuljmpamdocnxppueww.supabase.co',\n  SUPABASE_SERVICE_ROLE_KEY: $input.first().json.constants.SUPABASE_SERVICE_ROLE_KEY || '',\n  MAIN_WORKFLOW_WEBHOOK_URL_PROD: $input.first().json.constants.MAIN_WORKFLOW_WEBHOOK_URL_PROD || 'https://n8n.alopsi.com.br/webhook/UfmzO0nzsqKU0hZx',\n  MAIN_WORKFLOW_WEBHOOK_URL_TEST:  $input.first().json.constants.MAIN_WORKFLOW_WEBHOOK_URL_TEST|| 'https://n8n.alopsi.com.br/webhook-test/UfmzO0nzsqKU0hZx',\n  MAIN_WORKFLOW_WEBHOOK_ENV: $input.first().json.constants.MAIN_WORKFLOW_WEBHOOK_ENV || 'prod',\n  MAIN_WORKFLOW_WEBHOOK_TIMEOUT_MS: Number($input.first().json.constants.MAIN_WORKFLOW_WEBHOOK_TIMEOUT_MS || 10000),\n  REMINDER_INTERNAL_SECRET: $input.first().json.constants.REMINDER_INTERNAL_SECRET || '',\n  REMINDER_DEFAULT_TIMEZONE: 'America/Sao_Paulo',\n  REMINDER_DEFAULT_HOUR: '20:00',\n  REMINDER_WINDOW_MINUTES: Number(14),\n  REMINDER_QUERY_LIMIT: Number(1000)\n};\n\nfunction normalizePhone(value) {\n  return String(value || '').replace(/\\D/g, '');\n}\n\nasync function httpJson(url, options) {\n  const method = String(options.method || 'GET').toUpperCase();\n  const body = options.body;\n\n  const requestOptions = {\n    method,\n    url,\n    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },\n    timeout: options.timeout || CFG.MAIN_WORKFLOW_WEBHOOK_TIMEOUT_MS,\n    returnFullResponse: false,\n    ignoreHttpStatusErrors: false\n  };\n\n  if (body !== undefined) {\n    requestOptions.body = typeof body === 'string' ? body : JSON.stringify(body);\n  }\n\n  return await http(requestOptions);\n}\n\nasync function supabase(path, options) {\n  const baseUrl = String(CFG.SUPABASE_URL || '').replace(/\\/+$/, '');\n  const url = baseUrl + '/rest/v1/' + path;\n\n  return await httpJson(url, {\n    ...(options || {}),\n    headers: {\n      apikey: CFG.SUPABASE_SERVICE_ROLE_KEY,\n      Authorization: 'Bearer ' + CFG.SUPABASE_SERVICE_ROLE_KEY,\n      Prefer: options?.prefer || 'return=representation',\n      ...(options?.headers || {})\n    }\n  });\n}\n\nasync function dispatchReminderToMainWorkflow(phone, messageText, dispatchContext) {\n  const env = String(CFG.MAIN_WORKFLOW_WEBHOOK_ENV || 'prod').trim().toLowerCase();\n  const url = env === 'test'\n    ? CFG.MAIN_WORKFLOW_WEBHOOK_URL_TEST\n    : CFG.MAIN_WORKFLOW_WEBHOOK_URL_PROD;\n\n  return await httpJson(url, {\n    method: 'POST',\n    headers: {\n      'x-internal-secret': CFG.REMINDER_INTERNAL_SECRET\n    },\n    body: {\n      internal_reminder: true,\n      auth_secret: CFG.REMINDER_INTERNAL_SECRET,\n      phone,\n      message_text: messageText,\n      source: 'schedule',\n      dispatch_context: dispatchContext\n    },\n    timeout: CFG.MAIN_WORKFLOW_WEBHOOK_TIMEOUT_MS\n  });\n}\n\nasync function logDispatch(row) {\n  try {\n    await supabase('whatsapp_reminder_dispatch_logs', { method: 'POST', body: row });\n  } catch (_) {}\n}\n\nasync function updateLastReminded(phone, isoTimestamp) {\n  await supabase('whatsapp_reminder_preferences?phone=eq.' + encodeURIComponent(phone), {\n    method: 'PATCH',\n    body: {\n      last_reminded_at: isoTimestamp,\n      updated_at: isoTimestamp\n    }\n  });\n}\n\nfunction buildReminderMessage(localHourLabel) {\n  return [\n    '💜 Oi! Passando para lembrar do seu Diário Emocional.',\n    '',\n    'Leva menos de 2 minutos e pode te ajudar a perceber padrões com mais clareza.',\n    '',\n    'Quando quiser, envie *diário* para registrar.',\n    '',\n    '⏰ Lembrete configurado para: ' + localHourLabel\n  ].join('\\n');\n}\n\nfunction getLocalPartsForTimestamp(isoTimestamp, timezone) {\n  try {\n    const ts = isoTimestamp ? new Date(isoTimestamp) : new Date();\n    const formatter = new Intl.DateTimeFormat('en-CA', {\n      timeZone: timezone,\n      year: 'numeric',\n      month: '2-digit',\n      day: '2-digit',\n      hour: '2-digit',\n      minute: '2-digit',\n      weekday: 'short',\n      hour12: false\n    });\n\n    const parts = Object.fromEntries(formatter.formatToParts(ts).map(p => [p.type, p.value]));\n    return {\n      localDate: parts.year + '-' + parts.month + '-' + parts.day,\n      hour: Number(parts.hour === '24' ? 0 : parts.hour),\n      minute: Number(parts.minute),\n      weekday: parts.weekday?.toLowerCase() || null\n    };\n  } catch (_) {\n    return null;\n  }\n}\n\nfunction getLocalDateForTimestamp(isoTimestamp, timezone) {\n  if (!isoTimestamp) return null;\n  const parts = getLocalPartsForTimestamp(isoTimestamp, timezone);\n  return parts ? parts.localDate : null;\n}\n\nfunction parseTargetTime(hourStr) {\n  const [h, m] = String(hourStr || '20:00').split(':').map(Number);\n  return {\n    hours: isNaN(h) ? 20 : h,\n    minutes: isNaN(m) ? 0 : m,\n    label: String(isNaN(h) ? 20 : h).padStart(2, '0') + ':' + String(isNaN(m) ? 0 : m).padStart(2, '0')\n  };\n}\n\nfunction circularMinuteDiff(a, b) {\n  const diff = Math.abs(a - b);\n  return Math.min(diff, 1440 - diff);\n}\n\nfunction parseWeekdays(value) {\n  if (!value) return null;\n  if (Array.isArray(value)) return value.map(d => String(d).toLowerCase());\n  if (typeof value === 'string') {\n    try {\n      const arr = JSON.parse(value);\n      if (Array.isArray(arr)) return arr.map(d => String(d).toLowerCase());\n    } catch (_) {}\n    return value.split(',').map(d => d.trim().toLowerCase()).filter(Boolean);\n  }\n  return null;\n}\n\nif (!CFG.SUPABASE_URL || !CFG.SUPABASE_SERVICE_ROLE_KEY) {\n  throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios para o workflow agendado.');\n}\n\nif (!CFG.REMINDER_INTERNAL_SECRET) {\n  throw new Error('REMINDER_INTERNAL_SECRET é obrigatório para o handoff seguro entre workflows.');\n}\n\nif (!CFG.MAIN_WORKFLOW_WEBHOOK_URL_PROD && !CFG.MAIN_WORKFLOW_WEBHOOK_URL_TEST) {\n  throw new Error('MAIN_WORKFLOW_WEBHOOK_URL_PROD ou _TEST é obrigatório para o workflow agendado.');\n}\n\nconst summary = {\n  scanned: 0,\n  due: 0,\n  sent: 0,\n  skipped_weekday: 0,\n  skipped_window: 0,\n  skipped_duplicate: 0,\n  skipped_invalid: 0,\n  failed: 0,\n  env: String(CFG.MAIN_WORKFLOW_WEBHOOK_ENV || 'prod')\n};\n\nconst selectPath = 'whatsapp_reminder_preferences?is_enabled=eq.true&select=phone,user_id,tenant_id,timezone,reminder_hour_local,reminder_weekdays,last_reminded_at,updated_at&limit=' + Math.max(1, Number(CFG.REMINDER_QUERY_LIMIT || 1000));\nconst rows = await supabase(selectPath, { method: 'GET' });\nconst preferences = Array.isArray(rows) ? rows : [];\nsummary.scanned = preferences.length;\n\nfor (const pref of preferences) {\n  const phone = normalizePhone(pref.phone);\n  if (!phone) {\n    summary.skipped_invalid += 1;\n    continue;\n  }\n\n  const timezone = String(pref.timezone || CFG.REMINDER_DEFAULT_TIMEZONE || 'America/Sao_Paulo');\n  const localParts = getLocalPartsForTimestamp(new Date().toISOString(), timezone);\n\n  if (!localParts) {\n    summary.skipped_invalid += 1;\n    continue;\n  }\n\n  const weekdays = parseWeekdays(pref.reminder_weekdays);\n  if (weekdays && weekdays.length > 0 && localParts.weekday && !weekdays.includes(localParts.weekday)) {\n    summary.skipped_weekday += 1;\n    continue;\n  }\n\n  const target = parseTargetTime(pref.reminder_hour_local || CFG.REMINDER_DEFAULT_HOUR);\n  const nowMinutes = localParts.hour * 60 + localParts.minute;\n  const targetMinutes = target.hours * 60 + target.minutes;\n  const allowedWindow = Math.max(0, Number(CFG.REMINDER_WINDOW_MINUTES || 14));\n\n  if (circularMinuteDiff(nowMinutes, targetMinutes) > allowedWindow) {\n    summary.skipped_window += 1;\n    continue;\n  }\n\n  const lastLocalDate = getLocalDateForTimestamp(pref.last_reminded_at, timezone);\n  if (lastLocalDate && lastLocalDate === localParts.localDate) {\n    summary.skipped_duplicate += 1;\n    continue;\n  }\n\n  summary.due += 1;\n\n  const nowIso = new Date().toISOString();\n  const dispatchContext = {\n    timezone,\n    local_date: localParts.localDate,\n    target_hour: target.label,\n    preference_updated_at: pref.updated_at || null\n  };\n\n  try {\n    const result = await dispatchReminderToMainWorkflow(\n      phone,\n      buildReminderMessage(target.label),\n      dispatchContext\n    );\n\n    const mainOk = result?.ok === true || result?.internal_reminder_sent === true;\n\n    if (mainOk) {\n      await updateLastReminded(phone, nowIso);\n      summary.sent += 1;\n\n      await logDispatch({\n        phone,\n        user_id: pref.user_id || null,\n        tenant_id: pref.tenant_id || null,\n        status: 'sent',\n        timezone,\n        local_date: localParts.localDate,\n        local_hour_minute: String(localParts.hour).padStart(2, '0') + ':' + String(localParts.minute).padStart(2, '0'),\n        target_hour_minute: target.label,\n        metadata: {\n          weekday: localParts.weekday,\n          env: summary.env,\n          main_workflow_ok: true\n        },\n        attempted_at: nowIso\n      });\n    } else {\n      summary.failed += 1;\n\n      await logDispatch({\n        phone,\n        user_id: pref.user_id || null,\n        tenant_id: pref.tenant_id || null,\n        status: 'failed',\n        error_code: 'MAIN_WORKFLOW_RETURNED_NOT_OK',\n        timezone,\n        local_date: localParts.localDate,\n        target_hour_minute: target.label,\n        metadata: { env: summary.env },\n        attempted_at: nowIso\n      });\n    }\n  } catch (err) {\n    summary.failed += 1;\n\n    await logDispatch({\n      phone,\n      user_id: pref.user_id || null,\n      tenant_id: pref.tenant_id || null,\n      status: 'failed',\n      error_code: 'DISPATCH_ERROR',\n      error_message: String(err?.message || '').slice(0, 200),\n      timezone,\n      local_date: localParts.localDate,\n      target_hour_minute: target.label,\n      metadata: { env: summary.env },\n      attempted_at: nowIso\n    });\n  }\n}\n\nreturn [{\n  json: {\n    success: true,\n    summary,\n    executed_at: new Date().toISOString()\n  }\n}];\n"
       },
-      "id": "745f73ef-5b8f-4b6e-bb1a-f90711fcbf8c",
+      "id": "dd77898c-1087-492d-a9e8-f61c855bb857",
       "name": "Motor Lembretes Schedule",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        560,
-        400
+        480,
+        96
       ]
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-globals.globalConstants",
+      "typeVersion": 1,
+      "position": [
+        208,
+        96
+      ],
+      "id": "287aaf13-228d-4602-88b5-ba34e73da829",
+      "name": "Global Constants",
+      "credentials": {
+        "globalConstantsApi": {
+          "id": "eFQ52o0Pkd6TyD1c",
+          "name": "Global Constants account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -52,7 +69,7 @@
       "main": [
         [
           {
-            "node": "Motor Lembretes Schedule",
+            "node": "Global Constants",
             "type": "main",
             "index": 0
           }
@@ -63,6 +80,17 @@
       "main": [
         [
           {
+            "node": "Global Constants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Global Constants": {
+      "main": [
+        [
+          {
             "node": "Motor Lembretes Schedule",
             "type": "main",
             "index": 0
@@ -71,19 +99,33 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
+  "versionId": "2c28b88f-f918-415d-b32d-03ab82a90fee",
+  "meta": {
+    "instanceId": "08ba11328ffc564e41b7d210cb1be9b7f971fed317d90c29f27526a88f96842e"
+  },
+  "id": "UXA7aRaaWxF1cvsz",
   "tags": [
     {
+      "updatedAt": "2026-04-24T19:26:27.975Z",
+      "createdAt": "2026-04-24T19:26:27.975Z",
+      "id": "buZTnnRtn8ARbgIX",
       "name": "diario_emocional"
     },
     {
-      "name": "schedule"
+      "name": "schedule",
+      "id": "jYq4jI6ynCn9UaLZ",
+      "updatedAt": "2026-05-03T19:08:44.980Z",
+      "createdAt": "2026-05-03T19:08:44.980Z"
     },
     {
+      "updatedAt": "2025-08-07T22:16:59.962Z",
+      "createdAt": "2025-08-07T22:16:59.962Z",
+      "id": "FG495DJQus38rZ9C",
       "name": "whatsapp"
     }
   ]

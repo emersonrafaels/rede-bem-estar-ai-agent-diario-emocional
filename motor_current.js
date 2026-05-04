@@ -13,6 +13,7 @@ const INBOUND_RATE_LIMIT_WINDOW_SECONDS = Number(CFG.INBOUND_RATE_LIMIT_WINDOW_S
 const RATE_LIMIT_COOLDOWN_BASE_SECONDS = Number(CFG.RATE_LIMIT_COOLDOWN_BASE_SECONDS || 8);
 const RATE_LIMIT_COOLDOWN_MAX_SECONDS = Number(CFG.RATE_LIMIT_COOLDOWN_MAX_SECONDS || 120);
 const SESSION_STALE_HOURS = Number(CFG.SESSION_STALE_HOURS || 4);
+const INTERNAL_REMINDER_SECRET = String(CFG.INTERNAL_REMINDER_SECRET || '');
 
 let inboundDedupDisabled = false;
 let inboundRateLimitCooldownDisabled = false;
@@ -146,16 +147,44 @@ function isInsightsCommand(t) {
   return ['insights', 'meus insights', 'ver insights'].includes(t);
 }
 
+function normalizeCommandText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function isReminderEnableCommand(t) {
-  return ['ativar lembretes', 'ativar aviso', 'ativar notificacao', 'lembretes', 'aviso', 'notificacao'].includes(t);
+  const cmd = normalizeCommandText(t);
+
+  if (!cmd) return false;
+
+  return (
+    /^ativar\b.*\b(lembrete|lembretes|aviso|avisos|notificacao|notificacoes)\b/.test(cmd) ||
+    /^(lembrete|lembretes|aviso|avisos|notificacao|notificacoes)\b/.test(cmd)
+  );
 }
 
 function isReminderDisableCommand(t) {
-  return ['desativar lembretes', 'desativar aviso', 'desativar notificacao', 'sem lembretes', 'sem aviso'].includes(t);
+  const cmd = normalizeCommandText(t);
+
+  if (!cmd) return false;
+
+  return (
+    /^desativar\b.*\b(lembrete|lembretes|aviso|avisos|notificacao|notificacoes)\b/.test(cmd) ||
+    /^sem\b.*\b(lembrete|lembretes|aviso|avisos)\b/.test(cmd)
+  );
 }
 
 function isSupportCommand(t) {
-  return ['falar com suporte', 'suporte', 'preciso de ajuda', 'quero ajuda', 'apoio profissional', 'falar com profissional'].includes(t);
+  const cmd = normalizeCommandText(t);
+
+  if (!cmd) return false;
+
+  return /\b(falar com suporte|suporte|preciso de ajuda|quero ajuda|apoio profissional|falar com profissional)\b/.test(cmd);
 }
 
 const REMINDER_DEFAULT_TIMEZONE = 'America/Sao_Paulo';
@@ -2653,6 +2682,53 @@ async function saveMoodEntry(link, payload, buddyMessage, riskLevel, rawPayload 
   return moodEntry;
 }
 
+// ── Internal reminder ingress ────────────────────────────────────────────────
+// Quando o workflow agendado de lembretes faz handoff para cá, o payload contem
+// internal_reminder=true. Nesse caso validamos o segredo, enviamos a mensagem
+// WhatsApp diretamente e retornamos sem entrar na máquina conversacional.
+if (body?.internal_reminder === true) {
+  const providedSecret = String(
+    body.auth_secret ||
+    (input.headers?.['x-internal-secret']) ||
+    ''
+  ).trim();
+
+  if (!INTERNAL_REMINDER_SECRET) {
+    return [{ json: { ok: false, error: 'INTERNAL_REMINDER_SECRET_NOT_CONFIGURED' } }];
+  }
+
+  if (providedSecret !== INTERNAL_REMINDER_SECRET) {
+    return [{ json: { ok: false, error: 'UNAUTHORIZED_INTERNAL_REMINDER' } }];
+  }
+
+  const reminderPhone = String(body.phone || '').replace(/\D/g, '');
+  const reminderText = String(body.message_text || '').trim();
+  const dispatchContext = body.dispatch_context || {};
+
+  if (!reminderPhone || !reminderText) {
+    return [{ json: { ok: false, error: 'INVALID_INTERNAL_REMINDER_PAYLOAD', missing: !reminderPhone ? 'phone' : 'message_text' } }];
+  }
+
+  await sendWhatsApp(reminderPhone, reminderText);
+
+  return [{
+    json: {
+      ok: true,
+      internal_reminder_sent: true,
+      phone: reminderPhone,
+      source: String(body.source || 'schedule'),
+      dispatch_context: {
+        timezone: dispatchContext.timezone || null,
+        local_date: dispatchContext.local_date || null,
+        target_hour: dispatchContext.target_hour || null,
+        preference_updated_at: dispatchContext.preference_updated_at || null
+      },
+      sent_at: new Date().toISOString()
+    }
+  }];
+}
+// ── End internal reminder ingress ─────────────────────────────────────────────
+
 try {
 const msg = extractPayload(body);
 
@@ -3122,6 +3198,16 @@ if (isReminderEnableCommand(msg.textLower)) {
   );
 
   await sendWhatsApp(msg.phone, reminderTimezoneQuestion());
+  return [{ json: { ok: true } }];
+}
+
+if (isSupportCommand(msg.textLower)) {
+  await clearState(msg.phone);
+
+  await sendWhatsApp(
+    msg.phone,
+    `💜 Que bom que você está buscando apoio.\n\nVou avisar a equipe da sua instituição para que um profissional entre em contato com você em breve.\n\nSe precisar de apoio imediato agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nCuide-se 💜`
+  );
   return [{ json: { ok: true } }];
 }
 
@@ -4173,14 +4259,6 @@ if (state.current_step === 'WAITING_REMINDER_WEEKDAYS') {
     details.join('\n')
   );
 
-  return [{ json: { ok: true } }];
-}
-
-if (isSupportCommand(msg.textLower)) {
-  await sendWhatsApp(
-    msg.phone,
-    `💜 Que bom que você está buscando apoio.\n\nVou avisar a equipe da sua instituição para que um profissional entre em contato com você em breve.\n\nSe precisar de apoio imediato agora:\n📞 CVV: 188 (24h, gratuito)\n💬 cvv.org.br\n\nCuide-se 💜`
-  );
   return [{ json: { ok: true } }];
 }
 
