@@ -1220,16 +1220,30 @@ async function downloadEvolutionMedia(messageData) {
   const baseUrl = String(CFG.EVOLUTION_BASE_URL || '').replace(/\/+$/, '');
   const url = `${baseUrl}/message/downloadMediaMessage/${CFG.EVOLUTION_INSTANCE}`;
 
-  const result = await httpJson(url, {
-    method: 'POST',
-    headers: { apikey: CFG.EVOLUTION_API_KEY },
-    body: JSON.stringify({ message: messageData })
-  });
-
-  return {
-    base64: result?.base64 || null,
-    mimetype: String(result?.mimetype || 'audio/ogg; codecs=opus')
-  };
+  try {
+    if (!messageData) {
+      throw new Error('messageData não fornecido');
+    }
+    
+    const result = await httpJson(url, {
+      method: 'POST',
+      headers: { apikey: CFG.EVOLUTION_API_KEY },
+      body: JSON.stringify({ message: messageData })
+    });
+    
+    if (!result?.base64) {
+      throw new Error(`Evolution API: sem base64. Resposta: ${JSON.stringify(result || {}).slice(0, 200)}`);
+    }
+    
+    return {
+      base64: result.base64,
+      mimetype: String(result?.mimetype || 'audio/ogg; codecs=opus'),
+      size: Buffer.byteLength(result.base64, 'base64')
+    };
+  } catch (err) {
+    const errMsg = `[downloadEvolutionMedia] ${err?.message || String(err)}`;
+    throw new Error(errMsg);
+  }
 }
 
 async function transcribeAudio(base64Audio, mimetype) {
@@ -1241,30 +1255,53 @@ async function transcribeAudio(base64Audio, mimetype) {
     throw new Error('base64 do áudio não disponível para transcrição.');
   }
 
-  const buffer = Buffer.from(base64Audio, 'base64');
+  let buffer;
+  try {
+    buffer = Buffer.from(base64Audio, 'base64');
+    if (buffer.length === 0) {
+      throw new Error('Buffer vazio após decodificação');
+    }
+  } catch (err) {
+    throw new Error(`[convertBase64] ${err?.message || String(err)}`);
+  }
+
   const ext = mimetype.includes('mp4') ? 'mp4'
     : mimetype.includes('mpeg') ? 'mp3'
     : mimetype.includes('webm') ? 'webm'
     : 'ogg';
 
-  const result = await n8nHttpRequest({
-    method: 'POST',
-    url: 'https://api.openai.com/v1/audio/transcriptions',
-    headers: { Authorization: `Bearer ${CFG.OPENAI_API_KEY}` },
-    formData: {
-      file: {
-        value: buffer,
-        options: {
-          filename: `audio.${ext}`,
-          contentType: mimetype || 'audio/ogg'
-        }
-      },
-      model: 'whisper-1',
-      language: 'pt'
+  try {
+    const result = await n8nHttpRequest({
+      method: 'POST',
+      url: 'https://api.openai.com/v1/audio/transcriptions',
+      headers: { Authorization: `Bearer ${CFG.OPENAI_API_KEY}` },
+      formData: {
+        file: {
+          value: buffer,
+          options: {
+            filename: `audio.${ext}`,
+            contentType: mimetype || 'audio/ogg'
+          }
+        },
+        model: 'gpt-4o-mini-transcribe',
+        language: 'pt'
+      }
+    });
+    
+    if (!result?.text) {
+      throw new Error(`Sem texto na resposta. Resposta: ${JSON.stringify(result || {}).slice(0, 200)}`);
     }
-  });
-
-  return String(result?.text || '').trim();
+    
+    const text = String(result.text).trim();
+    if (!text) {
+      throw new Error('Texto transcrito está vazio');
+    }
+    
+    return text;
+  } catch (err) {
+    const errMsg = `[gpt-4o-mini-transcribe] ${err?.message || String(err)}`;
+    throw new Error(errMsg);
+  }
 }
 
 async function sendEmailOtp(to, code) {
@@ -2412,7 +2449,7 @@ function formatInitialDiaryMenu(lastData, todayData) {
     : 'Ainda não encontrei registros anteriores do seu Diário Emocional.';
 
   if (!hasToday) {
-    return `Olá 💜\n\n${lastText}\n\nAinda não encontrei um Diário Emocional registrado hoje.\n\nO que você deseja fazer?\n\n1️⃣ Registrar Diário Emocional de hoje\n2️⃣ Registrar Diário Emocional de outro dia\n3️⃣ Ver meu último registro\n4️⃣ Cancelar\n5️⃣ Ver últimos registros\n6️⃣ Abrir Diário na web\n7️⃣ Atalhos`;
+    return `Olá 💜\n\n${lastText}\n\nAinda não encontrei um Diário Emocional registrado hoje.\n\nO que você deseja fazer?\n\n1️⃣ Registrar Diário Emocional de hoje\n2️⃣ Registrar Diário Emocional de outro dia\n3️⃣ Ver meu último registro\n4️⃣ Ver últimos registros\n5️⃣ Abrir Diário na web\n6️⃣ Atalhos\n7️⃣ Cancelar`;
   }
 
   return `Olá 💜\n\n${lastText}\n\nVocê já registrou seu Diário Emocional hoje.\n\nO que deseja fazer?\n\n1️⃣ Ver registro de hoje\n2️⃣ Ajustar registro de hoje\n3️⃣ Registrar outro dia\n4️⃣ Manter como está\n5️⃣ Ver últimos registros\n6️⃣ Abrir Diário na web\n7️⃣ Atalhos`;
@@ -3658,7 +3695,8 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   }
 
   if (
-    choice === '4' ||
+    (hasTodayEntry && choice === '4') ||
+    (!hasTodayEntry && choice === '7') ||
     choice.includes('manter') ||
     choice.includes('cancelar') ||
     choice.includes('nada')
@@ -3673,7 +3711,7 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
     return [{ json: { ok: true } }];
   }
 
-  if (choice === '5' || choice.includes('últimos') || choice.includes('ultimos') || choice.includes('historico') || choice.includes('histórico')) {
+  if (((hasTodayEntry && choice === '5') || (!hasTodayEntry && choice === '4')) || choice.includes('últimos') || choice.includes('ultimos') || choice.includes('historico') || choice.includes('histórico')) {
     const pageSize = 5;
     const recentOffset = 0;
     const recentEntriesRaw = await getRecentMoodEntries(link.user_id, pageSize, link.tenant_id, recentOffset);
@@ -3709,7 +3747,7 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
     return [{ json: { ok: true } }];
   }
 
-  if (choice === '6' || choice.includes('web') || choice.includes('site') || choice.includes('link')) {
+  if (((hasTodayEntry && choice === '6') || (!hasTodayEntry && choice === '5')) || choice.includes('web') || choice.includes('site') || choice.includes('link')) {
     await sendWhatsApp(
       msg.phone,
       '🌐 Acesse seu Diário Emocional completo na web:\n\nhttps://redebemestar.com.br/diario-emocional'
@@ -3720,7 +3758,7 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
     return [{ json: { ok: true } }];
   }
 
-  if (choice === '7' || choice.includes('atalho')) {
+  if (((hasTodayEntry && choice === '7') || (!hasTodayEntry && choice === '6')) || choice.includes('atalho')) {
     await sendWhatsApp(
       msg.phone,
       '💡 *Atalhos disponíveis:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *ajuda* — ver todos os comandos'
@@ -4352,7 +4390,13 @@ if (state.current_step === 'WAITING_CONTEXT') {
         return [{ json: { ok: true } }];
       }
     } catch (audioErr) {
-      await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar digitar sua resposta?');
+      const errMsg = String(audioErr?.message || audioErr || 'Erro desconhecido');
+      await logMessage(msg.phone, 'error', 'audio_transcription_failed', {
+        error: errMsg,
+        step: 'WAITING_CONTEXT',
+        timestamp: new Date().toISOString()
+      });
+      await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar de novo ou digitar sua resposta?');
       return [{ json: { ok: true } }];
     }
   }
@@ -4394,7 +4438,13 @@ if (state.current_step === 'WAITING_FREE_TEXT') {
         return [{ json: { ok: true } }];
       }
     } catch (audioErr) {
-      await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar digitar sua resposta?');
+      const errMsg = String(audioErr?.message || audioErr || 'Erro desconhecido');
+      await logMessage(msg.phone, 'error', 'audio_transcription_failed', {
+        error: errMsg,
+        step: 'WAITING_FREE_TEXT',
+        timestamp: new Date().toISOString()
+      });
+      await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar de novo ou digitar sua resposta?');
       return [{ json: { ok: true } }];
     }
   }
