@@ -62,11 +62,20 @@ function extractPayload(payload) {
 
   const messageId = String(extractMessageId(data) || '').trim();
 
+  const audioData =
+    data.message?.audioMessage ||
+    data.message?.pttMessage ||
+    null;
+
+  const isAudio = !!audioData && !message;
+
   return {
     phone,
     messageId,
     text: String(message || '').trim(),
     textLower: String(message || '').trim().toLowerCase(),
+    isAudio,
+    rawMessageData: data,
     raw: payload
   };
 }
@@ -922,7 +931,7 @@ function contextQuestion(payload = {}) {
     prompt = 'Que momento positivo mais contribuiu para você se sentir bem hoje?';
   }
 
-  return `${buildStageHeader(3, 4, 'Contexto do dia')}\n\n${prompt}\n\nPode responder com uma palavra ou frase curta.\nExemplo: prova, trabalho, sono ruim, cansaço, apresentação, conversa difícil, dia tranquilo.`;
+  return `${buildStageHeader(3, 4, 'Contexto do dia')}\n\n${prompt}\n\nPode responder com uma palavra, frase curta ou 🎤 *enviar um áudio*.\nExemplo: prova, trabalho, sono ruim, cansaço, apresentação, conversa difícil, dia tranquilo.`;
 }
 
 async function httpJson(url, options = {}) {
@@ -1205,6 +1214,57 @@ async function sendWhatsApp(phone, text) {
       text
     })
   });
+}
+
+async function downloadEvolutionMedia(messageData) {
+  const baseUrl = String(CFG.EVOLUTION_BASE_URL || '').replace(/\/+$/, '');
+  const url = `${baseUrl}/message/downloadMediaMessage/${CFG.EVOLUTION_INSTANCE}`;
+
+  const result = await httpJson(url, {
+    method: 'POST',
+    headers: { apikey: CFG.EVOLUTION_API_KEY },
+    body: JSON.stringify({ message: messageData })
+  });
+
+  return {
+    base64: result?.base64 || null,
+    mimetype: String(result?.mimetype || 'audio/ogg; codecs=opus')
+  };
+}
+
+async function transcribeAudio(base64Audio, mimetype) {
+  if (!CFG.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY não configurada para transcrição de áudio.');
+  }
+
+  if (!base64Audio) {
+    throw new Error('base64 do áudio não disponível para transcrição.');
+  }
+
+  const buffer = Buffer.from(base64Audio, 'base64');
+  const ext = mimetype.includes('mp4') ? 'mp4'
+    : mimetype.includes('mpeg') ? 'mp3'
+    : mimetype.includes('webm') ? 'webm'
+    : 'ogg';
+
+  const result = await n8nHttpRequest({
+    method: 'POST',
+    url: 'https://api.openai.com/v1/audio/transcriptions',
+    headers: { Authorization: `Bearer ${CFG.OPENAI_API_KEY}` },
+    formData: {
+      file: {
+        value: buffer,
+        options: {
+          filename: `audio.${ext}`,
+          contentType: mimetype || 'audio/ogg'
+        }
+      },
+      model: 'whisper-1',
+      language: 'pt'
+    }
+  });
+
+  return String(result?.text || '').trim();
 }
 
 async function sendEmailOtp(to, code) {
@@ -2335,6 +2395,11 @@ function formatEntryCompact(entry, analysis = null) {
   return parts.join(' | ');
 }
 
+function postSaveMenuMessage() {
+  const webUrl = String(CFG.WEB_URL || 'https://redebemestar.com.br/diario-emocional');
+  return `O que você deseja fazer agora?\n\n1️⃣ Registrar novo diário\n2️⃣ Ver registro na web — ${webUrl}\n3️⃣ Acessar o menu`;
+}
+
 function formatInitialDiaryMenu(lastData, todayData) {
   const hasLast = !!lastData?.entry;
   const hasToday = !!todayData?.entry;
@@ -3005,7 +3070,7 @@ await logMessage(msg.phone, 'inbound', msg.text, {
   message_id: msg.messageId || null
 });
 
-if (!msg.text) {
+if (!msg.text && !msg.isAudio) {
   await sendWhatsApp(
     msg.phone,
     'Recebi sua mensagem, mas não consegui ler o texto. Para abrir seu Diário Emocional, envie "diário".'
@@ -4269,10 +4334,27 @@ if (state.current_step === 'WAITING_SLEEP_QUALITY') {
 }
 
 if (state.current_step === 'WAITING_CONTEXT') {
-  if (isBack(msg.textLower)) {
+  if (!msg.isAudio && isBack(msg.textLower)) {
     await upsertState(msg.phone, 'WAITING_SLEEP_QUALITY', payload, link);
     await sendWhatsApp(msg.phone, sleepQualityQuestion());
     return [{ json: { ok: true } }];
+  }
+
+  let contextText = msg.text.trim();
+
+  if (msg.isAudio) {
+    await sendWhatsApp(msg.phone, '🎧 Recebi seu áudio! Um momento, estou transcrevendo...');
+    try {
+      const media = await downloadEvolutionMedia(msg.rawMessageData);
+      contextText = await transcribeAudio(media.base64, media.mimetype);
+      if (!contextText) {
+        await sendWhatsApp(msg.phone, 'Não consegui entender o áudio. Pode tentar de novo ou digitar sua resposta?');
+        return [{ json: { ok: true } }];
+      }
+    } catch (audioErr) {
+      await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar digitar sua resposta?');
+      return [{ json: { ok: true } }];
+    }
   }
 
   await upsertState(
@@ -4280,29 +4362,46 @@ if (state.current_step === 'WAITING_CONTEXT') {
     'WAITING_FREE_TEXT',
     {
       ...payload,
-      day_context: msg.text.trim()
+      day_context: contextText
     },
     link
   );
 
   await sendWhatsApp(
     msg.phone,
-    `Quer registrar algo mais sobre como você se sentiu?\n\nPode escrever livremente ou responder "pular".`
+    `Quer registrar algo mais sobre como você se sentiu?\n\nPode escrever livremente, 🎤 *enviar um áudio* ou responder "pular".`
   );
 
   return [{ json: { ok: true } }];
 }
 
 if (state.current_step === 'WAITING_FREE_TEXT') {
-  if (isBack(msg.textLower)) {
+  if (!msg.isAudio && isBack(msg.textLower)) {
     await upsertState(msg.phone, 'WAITING_CONTEXT', payload, link);
     await sendWhatsApp(msg.phone, contextQuestion(payload));
     return [{ json: { ok: true } }];
   }
 
-  const freeText = ['pular', 'não', 'nao', 'n'].includes(msg.textLower)
+  let freeTextResolved = msg.text.trim();
+
+  if (msg.isAudio) {
+    await sendWhatsApp(msg.phone, '🎧 Recebi seu áudio! Um momento, estou transcrevendo...');
+    try {
+      const media = await downloadEvolutionMedia(msg.rawMessageData);
+      freeTextResolved = await transcribeAudio(media.base64, media.mimetype);
+      if (!freeTextResolved) {
+        await sendWhatsApp(msg.phone, 'Não consegui entender o áudio. Pode tentar de novo ou digitar sua resposta?');
+        return [{ json: { ok: true } }];
+      }
+    } catch (audioErr) {
+      await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar digitar sua resposta?');
+      return [{ json: { ok: true } }];
+    }
+  }
+
+  const freeText = ['pular', 'não', 'nao', 'n'].includes(freeTextResolved.toLowerCase())
     ? ''
-    : msg.text.trim();
+    : freeTextResolved;
 
   const finalPayload = {
     ...payload,
@@ -4410,6 +4509,44 @@ if (state.current_step === 'WAITING_CONFIRMATION') {
     }
   }
 
+  await upsertState(msg.phone, 'WAITING_POST_SAVE_MENU', {}, link);
+  await sendWhatsApp(msg.phone, postSaveMenuMessage());
+
+  return [{ json: { ok: true } }];
+}
+
+if (state.current_step === 'WAITING_POST_SAVE_MENU') {
+  const choice = msg.textLower;
+
+  if (choice === '1' || choice.includes('novo') || choice.includes('registrar') || choice.includes('diário') || choice.includes('diario')) {
+    const startPayload = await buildDiaryStartPayload(link.user_id, todayISO(), link.tenant_id);
+    await upsertState(msg.phone, 'WAITING_EMOTION_SCORE', startPayload, link);
+    await sendWhatsApp(
+      msg.phone,
+      `Vamos lá 💜\n\n${emotionQuestion(startPayload.emotion_configurations[0], 0, startPayload.emotion_configurations.length, { entryDate: startPayload.entry_date })}`
+    );
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice === '2' || choice.includes('web') || choice.includes('site') || choice.includes('link') || choice.includes('ver')) {
+    const webUrl = String(CFG.WEB_URL || 'https://redebemestar.com.br/diario-emocional');
+    await sendWhatsApp(msg.phone, `🌐 Acesse seu Diário Emocional completo na web:\n\n${webUrl}`);
+    await clearState(msg.phone);
+    return [{ json: { ok: true } }];
+  }
+
+  if (choice === '3' || choice.includes('menu') || choice.includes('início') || choice.includes('inicio')) {
+    const todayData = await getTodayMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    const lastData = await getLastMoodEntryWithAnalysis(link.user_id, link.tenant_id);
+    await upsertState(msg.phone, 'WAITING_INITIAL_DIARY_MENU', {}, link);
+    await sendWhatsApp(msg.phone, formatInitialDiaryMenu(lastData, todayData));
+    return [{ json: { ok: true } }];
+  }
+
+  await sendWhatsApp(
+    msg.phone,
+    `Me responda com:\n1️⃣ para registrar novo diário\n2️⃣ para ver na web\n3️⃣ para acessar o menu`
+  );
   return [{ json: { ok: true } }];
 }
 
