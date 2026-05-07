@@ -81,6 +81,32 @@ function extractPayload(payload) {
   };
 }
 
+function resolveIncomingMessage(inputPayload, bodyPayload) {
+  const extracted = extractPayload(bodyPayload);
+  const prepared = inputPayload?.msg;
+
+  if (!prepared || typeof prepared !== 'object') {
+    return extracted;
+  }
+
+  const preparedText = String(prepared.text ?? extracted.text ?? '').trim();
+  const preparedPhone = normalizePhone(prepared.phone || extracted.phone || '');
+  const alreadyTranscribed = inputPayload?.audio_transcribed === true || prepared?.audio_transcribed === true;
+  const preparedIsAudio = typeof prepared.isAudio === 'boolean' ? prepared.isAudio : extracted.isAudio;
+
+  return {
+    ...extracted,
+    ...prepared,
+    phone: preparedPhone,
+    text: preparedText,
+    textLower: preparedText.toLowerCase(),
+    // If audio was transcribed upstream, treat it as text here.
+    isAudio: alreadyTranscribed ? false : preparedIsAudio,
+    rawMessageData: prepared.rawMessageData || extracted.rawMessageData,
+    raw: prepared.raw || extracted.raw
+  };
+}
+
 async function hashCode(code) {
   const normalized = String(code || '').trim();
 
@@ -3412,7 +3438,7 @@ if (body?.internal_reminder === true) {
 // ── End internal reminder ingress ─────────────────────────────────────────────
 
 try {
-const msg = extractPayload(body);
+const msg = resolveIncomingMessage(input, body);
 
 if (!msg.phone) {
   return [{ json: { ok: false, error: 'Telefone não encontrado no payload da Evolution API.' } }];
@@ -3476,9 +3502,37 @@ if (state?.current_step === 'WAITING_TRANSCRIPTION_TEST') {
     return [{ json: { ok: true, test_mode: true, engine_version: AUDIO_ENGINE_VERSION } }];
   }
 
-  if (!msg.isAudio) {
+  const hasUpstreamTranscript =
+    input?.audio_transcribed === true ||
+    String(input?.audio_transcript || '').trim().length > 0;
+
+  if (!msg.isAudio && !hasUpstreamTranscript) {
     await sendWhatsApp(msg.phone, 'Envie um áudio para eu testar a transcrição, ou *cancelar* para sair.');
     return [{ json: { ok: true, test_mode: true, engine_version: AUDIO_ENGINE_VERSION } }];
+  }
+
+  if (hasUpstreamTranscript) {
+    const safeTranscript = String(msg.text || input?.audio_transcript || '').trim();
+
+    if (!safeTranscript) {
+      await sendWhatsApp(msg.phone, 'Não consegui transcrever esse áudio de teste. Você pode tentar novamente ou enviar *cancelar*.');
+      return [{ json: { ok: true, audio_status: 'empty_transcription', engine_version: AUDIO_ENGINE_VERSION, test_mode: true } }];
+    }
+
+    await sendWhatsApp(
+      msg.phone,
+      `🧪 Teste de transcrição concluído.\n\nTranscrição:\n${safeTranscript}`
+    );
+
+    return [{
+      json: {
+        ok: true,
+        audio_status: 'transcription_test_ok',
+        engine_version: AUDIO_ENGINE_VERSION,
+        test_mode: true,
+        transcript_preview: safeTranscript
+      }
+    }];
   }
 
   await sendWhatsApp(msg.phone, '🎧 Recebi seu áudio de teste. Um momento, estou transcrevendo...');
@@ -5159,12 +5213,10 @@ return [{ json: { ok: true } }];
   } catch (_) {}
   try {
     const fallbackPhone = extractPayload(body).phone;
-    if (fallbackPhone) {
+    if (!isStateConflict && fallbackPhone) {
       await sendWhatsApp(
         fallbackPhone,
-        isStateConflict
-          ? 'Recebi mensagens quase ao mesmo tempo e preciso que você envie novamente para garantir o registro correto.'
-          : 'Tive uma instabilidade aqui e não consegui processar agora. Pode tentar novamente em instantes? 💜'
+        'Tive uma instabilidade aqui e não consegui processar agora. Pode tentar novamente em instantes? 💜'
       );
     }
   } catch (_) {}
