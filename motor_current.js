@@ -14,6 +14,7 @@ const RATE_LIMIT_COOLDOWN_BASE_SECONDS = Number(CFG.RATE_LIMIT_COOLDOWN_BASE_SEC
 const RATE_LIMIT_COOLDOWN_MAX_SECONDS = Number(CFG.RATE_LIMIT_COOLDOWN_MAX_SECONDS || 120);
 const SESSION_STALE_HOURS = Number(CFG.SESSION_STALE_HOURS || 4);
 const INTERNAL_REMINDER_SECRET = String(CFG.INTERNAL_REMINDER_SECRET || '');
+const AUDIO_ENGINE_VERSION = 'audio-v4-whisper-mp4';
 
 let inboundDedupDisabled = false;
 let inboundRateLimitCooldownDisabled = false;
@@ -126,6 +127,10 @@ function isStartCommand(t) {
 
 function isCancel(t) {
   return ['cancelar', 'sair', 'parar', 'encerrar', 'reiniciar'].includes(t);
+}
+
+function isTranscriptionTestCommand(t) {
+  return ['testar transcricao', 'testar transcrição', 'teste transcricao', 'teste transcrição'].includes(t);
 }
 
 function isBack(t) {
@@ -1218,32 +1223,124 @@ async function sendWhatsApp(phone, text) {
 
 async function downloadEvolutionMedia(messageData) {
   const baseUrl = String(CFG.EVOLUTION_BASE_URL || '').replace(/\/+$/, '');
-  const url = `${baseUrl}/message/downloadMediaMessage/${CFG.EVOLUTION_INSTANCE}`;
+  const instance = String(CFG.EVOLUTION_INSTANCE || '');
+  const apiKey = String(CFG.EVOLUTION_API_KEY || '');
 
-  try {
-    if (!messageData) {
-      throw new Error('messageData não fornecido');
-    }
-    
-    const result = await httpJson(url, {
-      method: 'POST',
-      headers: { apikey: CFG.EVOLUTION_API_KEY },
-      body: JSON.stringify({ message: messageData })
-    });
-    
-    if (!result?.base64) {
-      throw new Error(`Evolution API: sem base64. Resposta: ${JSON.stringify(result || {}).slice(0, 200)}`);
-    }
-    
-    return {
-      base64: result.base64,
-      mimetype: String(result?.mimetype || 'audio/ogg; codecs=opus'),
-      size: Buffer.byteLength(result.base64, 'base64')
-    };
-  } catch (err) {
-    const errMsg = `[downloadEvolutionMedia] ${err?.message || String(err)}`;
-    throw new Error(errMsg);
+  if (!messageData) {
+    throw new Error('[downloadEvolutionMedia] messageData não fornecido');
   }
+
+  if (!baseUrl || !instance || !apiKey) {
+    throw new Error(`[downloadEvolutionMedia] Configuração Evolution API incompleta: baseUrl=${!!baseUrl}, instance=${!!instance}, apiKey=${!!apiKey}`);
+  }
+
+  const audioMessage = messageData?.message?.audioMessage;
+  if (!audioMessage) {
+    throw new Error('[downloadEvolutionMedia] message.audioMessage não encontrado no payload');
+  }
+
+  const messageId = String(messageData?.key?.id || '').trim();
+  if (!messageId) {
+    throw new Error('[downloadEvolutionMedia] message.key.id ausente para download da mídia');
+  }
+
+  const maskedMessageId = messageId.length > 8
+    ? `${messageId.slice(0, 4)}...${messageId.slice(-4)}`
+    : messageId;
+
+  const originalMimetype = audioMessage?.mimetype || 'audio/ogg; codecs=opus';
+  const headers = {
+    apikey: apiKey,
+    'Content-Type': 'application/json'
+  };
+
+  const primaryEndpoint = `${baseUrl}/chat/getBase64FromMediaMessage/${instance}`;
+  const primaryBody = {
+    message: {
+      key: {
+        id: messageId
+      }
+    },
+    convertToMp4: true
+  };
+
+  const requestMedia = async (url, body) => {
+    return await n8nHttpRequest({
+      method: 'POST',
+      url,
+      headers,
+      body,
+      json: true,
+      timeout: 30000
+    });
+  };
+
+  let response;
+  try {
+    response = await requestMedia(primaryEndpoint, primaryBody);
+  } catch (err) {
+    const statusCode = Number(err?.statusCode || err?.response?.statusCode || err?.response?.status || 0);
+    const errCode = String(err?.code || '');
+    const retriableNetworkCodes = ['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED'];
+    const retriableStatus = [408, 425, 429, 500, 502, 503, 504];
+    const isRetriable = retriableNetworkCodes.includes(errCode) || retriableStatus.includes(statusCode);
+
+    if (!isRetriable) {
+      throw new Error(
+        `[downloadEvolutionMedia] Evolution API rejeitou a mídia no endpoint v2.3.7 (${primaryEndpoint}) ` +
+        `[status=${statusCode || 'n/a'} message_id=${maskedMessageId}]: ${err?.message || String(err)}`
+      );
+    }
+
+    const legacyEndpoint = `${baseUrl}/message/downloadMediaMessage/${instance}`;
+    try {
+      response = await requestMedia(legacyEndpoint, messageData);
+    } catch (legacyErr) {
+      const legacyStatus = Number(legacyErr?.statusCode || legacyErr?.response?.statusCode || legacyErr?.response?.status || 0);
+      throw new Error(
+        `[downloadEvolutionMedia] Falha no endpoint principal e fallback legado ` +
+        `(primary_status=${statusCode || 'n/a'}, legacy_status=${legacyStatus || 'n/a'}, message_id=${maskedMessageId}): ` +
+        `${legacyErr?.message || String(legacyErr)}`
+      );
+    }
+  }
+
+  // Evolution API pode retornar { base64, mimetype } ou uma string base64 direta
+  let base64;
+  if (typeof response === 'string') {
+    base64 = response;
+  } else if (response?.base64) {
+    base64 = response.base64;
+  } else if (response?.data?.base64) {
+    base64 = response.data.base64;
+  } else if (response?.message?.base64) {
+    base64 = response.message.base64;
+  } else if (Buffer.isBuffer(response)) {
+    base64 = response.toString('base64');
+  } else {
+    const preview = JSON.stringify(response || {}).slice(0, 300);
+    const keys = Object.keys(response || {}).slice(0, 10).join(', ');
+    throw new Error(`[downloadEvolutionMedia] Formato de resposta inesperado (tipo=${typeof response}, keys=${keys}): ${preview}`);
+  }
+
+  if (!base64) {
+    throw new Error('[downloadEvolutionMedia] base64 vazio na resposta da Evolution API');
+  }
+
+  const normalizedOriginalMimetype = String(originalMimetype || '').split(';')[0].trim() || 'audio/ogg';
+  const responseMimetypeRaw =
+    response?.mimetype ||
+    response?.data?.mimetype ||
+    response?.message?.mimetype ||
+    '';
+  const responseMimetype = String(responseMimetypeRaw || '').split(';')[0].trim();
+  const finalMimetype = responseMimetype || (primaryBody.convertToMp4 ? 'audio/mp4' : normalizedOriginalMimetype);
+
+  return {
+    base64,
+    mimetype: finalMimetype,
+    size: Buffer.from(base64, 'base64').length
+  };
 }
 
 async function transcribeAudio(base64Audio, mimetype) {
@@ -1255,9 +1352,15 @@ async function transcribeAudio(base64Audio, mimetype) {
     throw new Error('base64 do áudio não disponível para transcrição.');
   }
 
+  // Strip data URI prefix if present (e.g. "data:audio/ogg;base64,...")
+  const rawBase64 = String(base64Audio).replace(/^data:[^;]+;base64,/i, '');
+
+  // Strip codec params from mimetype (e.g. "audio/ogg; codecs=opus" → "audio/ogg")
+  const safeMimetype = String(mimetype || '').split(';')[0].trim() || 'audio/ogg';
+
   let buffer;
   try {
-    buffer = Buffer.from(base64Audio, 'base64');
+    buffer = Buffer.from(rawBase64, 'base64');
     if (buffer.length === 0) {
       throw new Error('Buffer vazio após decodificação');
     }
@@ -1265,43 +1368,187 @@ async function transcribeAudio(base64Audio, mimetype) {
     throw new Error(`[convertBase64] ${err?.message || String(err)}`);
   }
 
-  const ext = mimetype.includes('mp4') ? 'mp4'
-    : mimetype.includes('mpeg') ? 'mp3'
-    : mimetype.includes('webm') ? 'webm'
-    : 'ogg';
+  const firstByte = buffer[0];
+  const secondByte = buffer[1];
+  const thirdByte = buffer[2];
+  const fourthByte = buffer[3];
+  const audioSignature = (
+    firstByte === 0x4f && secondByte === 0x67 && thirdByte === 0x67 && fourthByte === 0x53
+      ? 'ogg'
+      : firstByte === 0x1a && secondByte === 0x45 && thirdByte === 0xdf && fourthByte === 0xa3
+        ? 'webm'
+        : firstByte === 0x49 && secondByte === 0x44 && thirdByte === 0x33
+          ? 'mp3-id3'
+          : firstByte === 0xff && secondByte === 0xfb
+            ? 'mp3'
+            : firstByte === 0x52 && secondByte === 0x49 && thirdByte === 0x46 && fourthByte === 0x46
+              ? 'wav-riff'
+              : buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70
+                ? 'mp4-ftyp'
+                : 'unknown'
+  );
 
-  try {
-    const result = await n8nHttpRequest({
-      method: 'POST',
-      url: 'https://api.openai.com/v1/audio/transcriptions',
-      headers: { Authorization: `Bearer ${CFG.OPENAI_API_KEY}` },
-      formData: {
-        file: {
-          value: buffer,
-          options: {
-            filename: `audio.${ext}`,
-            contentType: mimetype || 'audio/ogg'
+  const parseStatus = (err) => {
+    const statusFromProps = err?.statusCode || err?.response?.statusCode || err?.response?.status || null;
+    const statusFromMessageMatch = String(err?.message || '').match(/status code\s*(\d{3})/i);
+    const statusFromMessage = statusFromMessageMatch ? statusFromMessageMatch[1] : null;
+    return Number(statusFromProps || statusFromMessage || 0) || 0;
+  };
+
+  const buildCandidates = (mime, signature) => {
+    if (signature === 'mp4-ftyp' || mime.includes('mp4') || mime.includes('m4a')) {
+      return [
+        { ext: 'mp4', contentType: 'audio/mp4' }
+      ];
+    }
+
+    if (signature === 'webm' || mime.includes('webm')) {
+      return [
+        { ext: 'webm', contentType: 'audio/webm' }
+      ];
+    }
+
+    if (signature === 'ogg' || mime.includes('ogg')) {
+      return [
+        { ext: 'ogg', contentType: 'audio/ogg' }
+      ];
+    }
+
+    if (signature === 'mp3' || signature === 'mp3-id3' || mime.includes('mpeg') || mime.includes('mp3')) {
+      return [
+        { ext: 'mp3', contentType: 'audio/mpeg' }
+      ];
+    }
+
+    return [{ ext: 'mp4', contentType: 'audio/mp4' }];
+  };
+
+  const buildModelCandidates = () => {
+    const preferred = String(CFG.OPENAI_TRANSCRIBE_MODEL || '').trim();
+    const defaults = ['gpt-4o-mini-transcribe', 'whisper-1'];
+    const list = preferred ? [preferred, ...defaults] : defaults;
+    return [...new Set(list.filter(Boolean))];
+  };
+
+  const candidates = buildCandidates(safeMimetype, audioSignature);
+  const models = buildModelCandidates();
+  const seen = new Set();
+  const normalizedCandidates = candidates.filter((c) => {
+    const key = `${c.ext}|${c.contentType}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const failures = [];
+
+  for (const model of models) {
+    for (const candidate of normalizedCandidates) {
+      try {
+        const BlobCtor = typeof Blob !== 'undefined'
+          ? Blob
+          : (() => { try { return require('buffer').Blob; } catch (_) { return null; } })();
+        const hasWebMultipart =
+          typeof fetch === 'function' &&
+          typeof FormData !== 'undefined' &&
+          !!BlobCtor;
+
+        let result;
+
+        if (hasWebMultipart) {
+          const fd = new FormData();
+          fd.append('file', new BlobCtor([buffer], { type: candidate.contentType }), `audio.${candidate.ext}`);
+          fd.append('model', model);
+          fd.append('language', 'pt');
+
+          const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${CFG.OPENAI_API_KEY}` },
+            body: fd
+          });
+
+          if (!res.ok) {
+            const bodyText = await res.text().catch(() => '');
+            const fetchErr = new Error(`Request failed with status code ${res.status}`);
+            fetchErr.statusCode = res.status;
+            fetchErr.body = bodyText;
+            throw fetchErr;
           }
-        },
-        model: 'gpt-4o-mini-transcribe',
-        language: 'pt'
+
+          result = await res.json();
+        } else {
+          result = await n8nHttpRequest({
+            method: 'POST',
+            url: 'https://api.openai.com/v1/audio/transcriptions',
+            headers: { Authorization: `Bearer ${CFG.OPENAI_API_KEY}` },
+            formData: {
+              file: {
+                value: buffer,
+                options: {
+                  filename: `audio.${candidate.ext}`,
+                  contentType: candidate.contentType
+                }
+              },
+              model,
+              language: 'pt'
+            }
+          });
+        }
+
+        if (!result?.text) {
+          throw new Error(`Sem texto na resposta. Resposta: ${JSON.stringify(result || {}).slice(0, 300)}`);
+        }
+
+        const text = String(result.text).trim();
+        if (!text) {
+          throw new Error('Texto transcrito está vazio');
+        }
+
+        return text;
+      } catch (err) {
+        const status = parseStatus(err);
+        const responseBody =
+          err?.response?.body ??
+          err?.response?.data ??
+          err?.body ??
+          err?.cause?.response?.body ??
+          (() => {
+            try {
+              const m = String(err?.message || '').match(/(\{[\s\S]*\})/);
+              return m ? JSON.parse(m[1]) : null;
+            } catch (_) { return null; }
+          })() ??
+          null;
+        failures.push({
+          status: status || 'n/a',
+          model,
+          ext: candidate.ext,
+          contentType: candidate.contentType,
+          message: String(err?.message || err || 'unknown_error').slice(0, 220),
+          body: responseBody ? JSON.stringify(responseBody).slice(0, 280) : ''
+        });
+
+        if (![400, 415, 422].includes(status)) {
+          break;
+        }
       }
-    });
-    
-    if (!result?.text) {
-      throw new Error(`Sem texto na resposta. Resposta: ${JSON.stringify(result || {}).slice(0, 200)}`);
     }
-    
-    const text = String(result.text).trim();
-    if (!text) {
-      throw new Error('Texto transcrito está vazio');
-    }
-    
-    return text;
-  } catch (err) {
-    const errMsg = `[gpt-4o-mini-transcribe] ${err?.message || String(err)}`;
-    throw new Error(errMsg);
   }
+
+  const failurePreview = failures
+    .map((f, idx) => `#${idx + 1}[status=${f.status},model=${f.model || 'n/a'},ext=${f.ext},ct=${f.contentType}] ${f.message}${f.body ? ` | body: ${f.body}` : ''}`)
+    .join(' || ')
+    .slice(0, 1200);
+
+  const hexPreview = Array.from(buffer.slice(0, 16)).map((b) => b.toString(16).padStart(2, '0')).join(' ');
+  const base64Preview = String(rawBase64 || '').slice(0, 60);
+
+  throw new Error(
+    `[whisper-1] transcription_failed ` +
+    `mimetype=${safeMimetype} bytes=${buffer.length} signature=${audioSignature} ` +
+    `hex=${hexPreview} b64prefix=${base64Preview} ` +
+    `models=${models.join(',')} attempts=${models.length * normalizedCandidates.length} failures=${failurePreview || 'none'}`
+  );
 }
 
 async function sendEmailOtp(to, code) {
@@ -1328,6 +1575,43 @@ async function sendEmailOtp(to, code) {
       text
     })
   });
+}
+
+async function runTranscriptionTest(msg) {
+  if (!msg.isAudio) {
+    return {
+      ok: true,
+      audio_status: 'awaiting_test_audio',
+      engine_version: AUDIO_ENGINE_VERSION,
+      test_mode: true
+    };
+  }
+
+  const media = await downloadEvolutionMedia(msg.rawMessageData);
+  const transcript = await transcribeAudio(media.base64, media.mimetype);
+  const safeTranscript = String(transcript || '').trim();
+
+  if (!safeTranscript) {
+    return {
+      ok: true,
+      audio_status: 'empty_transcription',
+      engine_version: AUDIO_ENGINE_VERSION,
+      test_mode: true
+    };
+  }
+
+  await sendWhatsApp(
+    msg.phone,
+    `🧪 Teste de transcrição concluído.\n\nTranscrição:\n${safeTranscript}`
+  );
+
+  return {
+    ok: true,
+    audio_status: 'transcription_test_ok',
+    engine_version: AUDIO_ENGINE_VERSION,
+    test_mode: true,
+    transcript_preview: safeTranscript.slice(0, 500)
+  };
 }
 
 async function getLink(phone) {
@@ -3131,6 +3415,39 @@ let link = await getLink(msg.phone);
 let state = await getState(msg.phone);
 stateTransitionExpectedUpdatedAt = state?.updated_at || null;
 
+if (isTranscriptionTestCommand(msg.textLower)) {
+  await upsertState(msg.phone, 'WAITING_TRANSCRIPTION_TEST', {}, link, state?.updated_at || null);
+  await sendWhatsApp(
+    msg.phone,
+    '🧪 Modo de teste de transcrição ativado.\n\nEnvie um áudio e eu vou responder só com a transcrição, sem preencher o Diário Emocional.'
+  );
+  return [{ json: { ok: true, test_mode: true, engine_version: AUDIO_ENGINE_VERSION } }];
+}
+
+if (state?.current_step === 'WAITING_TRANSCRIPTION_TEST') {
+  if (isCancel(msg.textLower)) {
+    await clearState(msg.phone);
+    await sendWhatsApp(msg.phone, 'Teste de transcrição encerrado.');
+    return [{ json: { ok: true, test_mode: true, engine_version: AUDIO_ENGINE_VERSION } }];
+  }
+
+  if (!msg.isAudio) {
+    await sendWhatsApp(msg.phone, 'Envie um áudio para eu testar a transcrição, ou *cancelar* para sair.');
+    return [{ json: { ok: true, test_mode: true, engine_version: AUDIO_ENGINE_VERSION } }];
+  }
+
+  await sendWhatsApp(msg.phone, '🎧 Recebi seu áudio de teste. Um momento, estou transcrevendo...');
+
+  try {
+    const testResult = await runTranscriptionTest(msg);
+    return [{ json: testResult }];
+  } catch (audioErr) {
+    const errMsg = String(audioErr?.message || audioErr || 'Erro desconhecido');
+    await sendWhatsApp(msg.phone, 'Não consegui transcrever esse áudio de teste. Você pode tentar novamente ou enviar *cancelar*.');
+    return [{ json: { ok: true, audio_status: 'transcription_error', error_debug: errMsg, engine_version: AUDIO_ENGINE_VERSION, test_mode: true } }];
+  }
+}
+
 const activeCooldown = await getActiveRateLimitCooldown(msg.phone);
 
 if (activeCooldown.active) {
@@ -3380,7 +3697,7 @@ if (!link) {
 
     await sendWhatsApp(
       msg.phone,
-      '💡 *Atalhos que você pode usar a qualquer momento:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *ajuda* — ver todos os comandos'
+      '💡 *Atalhos que você pode usar a qualquer momento:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *testar transcrição* — testar transcrição de áudio\n• *ajuda* — ver todos os comandos'
     );
 
     return [{ json: { ok: true } }];
@@ -3696,7 +4013,6 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
 
   if (
     (hasTodayEntry && choice === '4') ||
-    (!hasTodayEntry && choice === '7') ||
     choice.includes('manter') ||
     choice.includes('cancelar') ||
     choice.includes('nada')
@@ -3706,6 +4022,17 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
     await sendWhatsApp(
       msg.phone,
       'Tudo certo 💜 Mantive seus registros como estão. Quando quiser abrir o Diário Emocional novamente, envie "diário".'
+    );
+
+    return [{ json: { ok: true } }];
+  }
+
+  if (!hasTodayEntry && choice === '7') {
+    await clearState(msg.phone);
+
+    await sendWhatsApp(
+      msg.phone,
+      'Tudo bem, fluxo reiniciado 💜 Quando quiser abrir o Diário Emocional, envie "diário".'
     );
 
     return [{ json: { ok: true } }];
@@ -3761,7 +4088,7 @@ if (state.current_step === 'WAITING_INITIAL_DIARY_MENU') {
   if (((hasTodayEntry && choice === '7') || (!hasTodayEntry && choice === '6')) || choice.includes('atalho')) {
     await sendWhatsApp(
       msg.phone,
-      '💡 *Atalhos disponíveis:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *ajuda* — ver todos os comandos'
+      '💡 *Atalhos disponíveis:*\n\n• *diário* — abrir o Diário Emocional\n• *registrar hoje* — iniciar o diário de hoje\n• *ajustar hoje* — editar o diário de hoje\n• *último registro* — ver seu último diário\n• *insights* (ou *resumo*) — resumo da semana\n• *ativar lembretes* / *desativar lembretes*\n• *falar com suporte* — conectar com apoio profissional\n• *testar transcrição* — testar transcrição de áudio\n• *ajuda* — ver todos os comandos'
     );
     return [{ json: { ok: true } }];
   }
@@ -4381,23 +4708,33 @@ if (state.current_step === 'WAITING_CONTEXT') {
   let contextText = msg.text.trim();
 
   if (msg.isAudio) {
+    const audioLogMeta = { phone: msg.phone, step: 'WAITING_CONTEXT', timestamp: new Date().toISOString() };
+    console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'audio_received', hasRawData: !!msg.rawMessageData }));
+    
     await sendWhatsApp(msg.phone, '🎧 Recebi seu áudio! Um momento, estou transcrevendo...');
     try {
+      console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'downloading_media', hasAudioMessage: !!msg.rawMessageData?.message?.audioMessage }));
       const media = await downloadEvolutionMedia(msg.rawMessageData);
+      
+      console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'media_downloaded', size: media?.size, mimetype: media?.mimetype }));
       contextText = await transcribeAudio(media.base64, media.mimetype);
+      
+      console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'transcription_success', textLength: contextText?.length }));
       if (!contextText) {
         await sendWhatsApp(msg.phone, 'Não consegui entender o áudio. Pode tentar de novo ou digitar sua resposta?');
-        return [{ json: { ok: true } }];
+        return [{ json: { ok: true, audio_status: 'empty_transcription', engine_version: AUDIO_ENGINE_VERSION } }];
       }
     } catch (audioErr) {
       const errMsg = String(audioErr?.message || audioErr || 'Erro desconhecido');
+      console.error('[AUDIO_ERROR]', JSON.stringify({ ...audioLogMeta, event: 'transcription_failed', error: errMsg }));
+      
       await logMessage(msg.phone, 'error', 'audio_transcription_failed', {
         error: errMsg,
         step: 'WAITING_CONTEXT',
         timestamp: new Date().toISOString()
       });
       await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar de novo ou digitar sua resposta?');
-      return [{ json: { ok: true } }];
+      return [{ json: { ok: true, audio_status: 'transcription_error', error_debug: errMsg, engine_version: AUDIO_ENGINE_VERSION } }];
     }
   }
 
@@ -4429,23 +4766,33 @@ if (state.current_step === 'WAITING_FREE_TEXT') {
   let freeTextResolved = msg.text.trim();
 
   if (msg.isAudio) {
+    const audioLogMeta = { phone: msg.phone, step: 'WAITING_FREE_TEXT', timestamp: new Date().toISOString() };
+    console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'audio_received', hasRawData: !!msg.rawMessageData }));
+    
     await sendWhatsApp(msg.phone, '🎧 Recebi seu áudio! Um momento, estou transcrevendo...');
     try {
+      console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'downloading_media', hasAudioMessage: !!msg.rawMessageData?.message?.audioMessage }));
       const media = await downloadEvolutionMedia(msg.rawMessageData);
+      
+      console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'media_downloaded', size: media?.size, mimetype: media?.mimetype }));
       freeTextResolved = await transcribeAudio(media.base64, media.mimetype);
+      
+      console.log('[AUDIO_DEBUG]', JSON.stringify({ ...audioLogMeta, event: 'transcription_success', textLength: freeTextResolved?.length }));
       if (!freeTextResolved) {
         await sendWhatsApp(msg.phone, 'Não consegui entender o áudio. Pode tentar de novo ou digitar sua resposta?');
-        return [{ json: { ok: true } }];
+        return [{ json: { ok: true, audio_status: 'empty_transcription', engine_version: AUDIO_ENGINE_VERSION } }];
       }
     } catch (audioErr) {
       const errMsg = String(audioErr?.message || audioErr || 'Erro desconhecido');
+      console.error('[AUDIO_ERROR]', JSON.stringify({ ...audioLogMeta, event: 'transcription_failed', error: errMsg }));
+      
       await logMessage(msg.phone, 'error', 'audio_transcription_failed', {
         error: errMsg,
         step: 'WAITING_FREE_TEXT',
         timestamp: new Date().toISOString()
       });
       await sendWhatsApp(msg.phone, 'Tive dificuldade para processar o áudio. Pode tentar de novo ou digitar sua resposta?');
-      return [{ json: { ok: true } }];
+      return [{ json: { ok: true, audio_status: 'transcription_error', error_debug: errMsg, engine_version: AUDIO_ENGINE_VERSION } }];
     }
   }
 
