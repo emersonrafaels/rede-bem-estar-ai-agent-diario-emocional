@@ -1440,18 +1440,24 @@ async function transcribeAudio(base64Audio, mimetype) {
     return true;
   });
 
+  const BlobCtor = typeof Blob !== 'undefined'
+    ? Blob
+    : (() => { try { return require('buffer').Blob; } catch (_) { return null; } })();
+  const runtimeCaps = {
+    hasFetch: typeof fetch === 'function',
+    hasFormData: typeof FormData !== 'undefined',
+    hasBlobGlobal: typeof Blob !== 'undefined',
+    hasBlobCtor: !!BlobCtor
+  };
+  const hasWebMultipart = runtimeCaps.hasFetch && runtimeCaps.hasFormData && runtimeCaps.hasBlobCtor;
+
   const failures = [];
 
   for (const model of models) {
     for (const candidate of normalizedCandidates) {
+      let attemptTransport = 'unknown';
       try {
-        const BlobCtor = typeof Blob !== 'undefined'
-          ? Blob
-          : (() => { try { return require('buffer').Blob; } catch (_) { return null; } })();
-        const hasWebMultipart =
-          typeof fetch === 'function' &&
-          typeof FormData !== 'undefined' &&
-          !!BlobCtor;
+        attemptTransport = hasWebMultipart ? 'fetch' : 'n8nHttpRequest';
 
         let result;
 
@@ -1471,6 +1477,13 @@ async function transcribeAudio(base64Audio, mimetype) {
             const bodyText = await res.text().catch(() => '');
             const fetchErr = new Error(`Request failed with status code ${res.status}`);
             fetchErr.statusCode = res.status;
+            fetchErr.statusText = String(res.statusText || '');
+            fetchErr.transportUsed = 'fetch';
+            fetchErr.responseHeaders = {
+              contentType: res.headers.get('content-type') || '',
+              requestId: res.headers.get('x-request-id') || '',
+              processingMs: res.headers.get('openai-processing-ms') || ''
+            };
             fetchErr.body = bodyText;
             throw fetchErr;
           }
@@ -1511,6 +1524,9 @@ async function transcribeAudio(base64Audio, mimetype) {
           err?.response?.body ??
           err?.response?.data ??
           err?.body ??
+          err?.error ??
+          err?.cause?.body ??
+          err?.cause?.response?.data ??
           err?.cause?.response?.body ??
           (() => {
             try {
@@ -1519,13 +1535,41 @@ async function transcribeAudio(base64Audio, mimetype) {
             } catch (_) { return null; }
           })() ??
           null;
+
+        const responseBodyType = responseBody == null
+          ? 'empty'
+          : typeof responseBody === 'string'
+            ? 'string'
+            : 'json';
+
+        let responseBodyPreview = '';
+        if (responseBodyType === 'string') {
+          responseBodyPreview = String(responseBody).slice(0, 280);
+        } else if (responseBodyType === 'json') {
+          try {
+            responseBodyPreview = JSON.stringify(responseBody).slice(0, 280);
+          } catch (_) {
+            responseBodyPreview = String(responseBody).slice(0, 280);
+          }
+        }
+
+        const requestId =
+          err?.responseHeaders?.requestId ||
+          err?.response?.headers?.['x-request-id'] ||
+          err?.response?.headers?.['X-Request-Id'] ||
+          '';
+
         failures.push({
           status: status || 'n/a',
           model,
           ext: candidate.ext,
           contentType: candidate.contentType,
+          transport: String(err?.transportUsed || attemptTransport || 'unknown'),
+          statusText: String(err?.statusText || ''),
+          requestId: String(requestId || ''),
+          responseBodyType,
           message: String(err?.message || err || 'unknown_error').slice(0, 220),
-          body: responseBody ? JSON.stringify(responseBody).slice(0, 280) : ''
+          body: responseBodyPreview
         });
 
         if (![400, 415, 422].includes(status)) {
@@ -1536,7 +1580,7 @@ async function transcribeAudio(base64Audio, mimetype) {
   }
 
   const failurePreview = failures
-    .map((f, idx) => `#${idx + 1}[status=${f.status},model=${f.model || 'n/a'},ext=${f.ext},ct=${f.contentType}] ${f.message}${f.body ? ` | body: ${f.body}` : ''}`)
+    .map((f, idx) => `#${idx + 1}[status=${f.status},statusText=${f.statusText || 'n/a'},transport=${f.transport || 'unknown'},model=${f.model || 'n/a'},ext=${f.ext},ct=${f.contentType},bodyType=${f.responseBodyType || 'empty'},requestId=${f.requestId || 'n/a'}] ${f.message}${f.body ? ` | body: ${f.body}` : ''}`)
     .join(' || ')
     .slice(0, 1200);
 
@@ -1547,6 +1591,7 @@ async function transcribeAudio(base64Audio, mimetype) {
     `[whisper-1] transcription_failed ` +
     `mimetype=${safeMimetype} bytes=${buffer.length} signature=${audioSignature} ` +
     `hex=${hexPreview} b64prefix=${base64Preview} ` +
+    `runtime=fetch:${runtimeCaps.hasFetch ? 1 : 0},formData:${runtimeCaps.hasFormData ? 1 : 0},blobGlobal:${runtimeCaps.hasBlobGlobal ? 1 : 0},blobCtor:${runtimeCaps.hasBlobCtor ? 1 : 0},multipart:${hasWebMultipart ? 1 : 0} ` +
     `models=${models.join(',')} attempts=${models.length * normalizedCandidates.length} failures=${failurePreview || 'none'}`
   );
 }
